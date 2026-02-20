@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'quiz_level_screen.dart';
+import 'package:quizzy2earn/core/app_router.dart';
+import 'package:quizzy2earn/core/navigation_service.dart';
 
 class LevelsScreen extends StatelessWidget {
   final List<Map<String, dynamic>> questions;
@@ -50,14 +51,12 @@ class LevelsScreen extends StatelessWidget {
                 onTap: isLocked
                     ? null
                     : () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => QuizLevelScreen(
-                        level: level,
-                        questions: questions,
-                      ),
-                    ),
+                  NavigationService.pushNamed(
+                    AppRouter.quizLevel,
+                    args: {
+                      'level': level,
+                      'questions': questions,
+                    },
                   );
                 },
                 child: Container(

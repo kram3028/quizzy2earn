@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_fortune_wheel/flutter_fortune_wheel.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:quizzy2earn/core/navigation_service.dart';
 import 'ads/ad_helper.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'widgets/bottom_banner_ad.dart';
@@ -153,7 +154,7 @@ class _DailySpinScreenState extends State<DailySpinScreen>
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => NavigationService.goBack(),
               child: const Text('OK'),
             ),
           ],
@@ -197,7 +198,7 @@ class _DailySpinScreenState extends State<DailySpinScreen>
           actions: [
             TextButton(
               onPressed: () {
-                Navigator.pop(context);
+                NavigationService.goBack();
                 _loadRewardedAd(); // try loading again
               },
               child: const Text('OK'),

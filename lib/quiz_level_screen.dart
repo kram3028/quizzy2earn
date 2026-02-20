@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:quizzy2earn/core/navigation_service.dart';
 import 'ads/ad_helper.dart';
 
 class QuizLevelScreen extends StatefulWidget {
@@ -181,7 +182,7 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
       });
     } else {
       await completeLevel();
-      Navigator.pop(context);
+      NavigationService.goBack();
     }
   }
 

@@ -21,6 +21,7 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
   final phoneController = TextEditingController(); // ✅ STEP 1
+  final referralController = TextEditingController();
   bool _acceptedTerms = false;
   bool _openingTerms = false;
 
@@ -121,25 +122,90 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
       final user = userCredential.user!;
 
       // 2️⃣ SAVE USER DATA IN FIRESTORE
+      // 2️⃣ SAVE USER DATA + REFERRAL
+      final referralCode = referralController.text.trim().toUpperCase();
+
+      String? referredByUserId;
+
+      if (referralCode.isNotEmpty) {
+        final query = await FirebaseFirestore.instance
+            .collection('users')
+            .where('referral.code', isEqualTo: referralCode)
+            .limit(1)
+            .get();
+
+        if (query.docs.isNotEmpty) {
+          referredByUserId = query.docs.first.id;
+        }
+      }
+
+      final userCode = user.uid.substring(0, 6).toUpperCase();
+
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
         'name': nameController.text.trim(),
         'email': user.email,
         'phone': '+91${phoneController.text.trim()}',
-        'coinsAvailable': 0,
+        'coinsAvailable': referredByUserId != null ? 50 : 0,
         'coinsLocked': 0,
         'createdAt': FieldValue.serverTimestamp(),
         'lastLogin': FieldValue.serverTimestamp(),
 
-        // 👇 keep these (used by Profile verification)
         'emailVerified': false,
         'emailEditable': true,
         'emailVerifiedAt': null,
 
-        // 🔥 STEP 1D — TERMS ACCEPTANCE (ADD HERE)
         'agreedToTerms': true,
-        'agreedTermsVersion': "1.0",  // ⚠️ must match app_config version
+        'agreedTermsVersion': "1.0",
         'termsAgreedAt': FieldValue.serverTimestamp(),
+
+        /// ⭐ DAILY LOGIN
+        'dailyLogin': {
+          'streak': 0,
+          'lastClaim': null,
+          'lastMissed': null,
+        },
+
+        /// ⭐ REFERRAL
+        'referral': {
+          'code': userCode,
+          'referredBy': referredByUserId,
+          'totalReferrals': 0,
+          'milestoneRewarded': false,
+        },
+
+        /// ⭐ BONUS
+        'bonus': {
+          'weeklyEarned': 0,
+          'weeklyResetAt': FieldValue.serverTimestamp(),
+        },
+
+        /// ⭐ MISSIONS
+        'missions': {
+          'quiz10': false,
+          'spin2': false,
+          'profileVerified': false,
+          'open3days': false,
+          'lastReset': FieldValue.serverTimestamp(),
+        },
       });
+
+      /// Give referral reward to inviter
+      if (referredByUserId != null) {
+        final referrerRef = FirebaseFirestore.instance
+            .collection('users')
+            .doc(referredByUserId);
+
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final snap = await tx.get(referrerRef);
+
+          if (snap.exists) {
+            tx.update(referrerRef, {
+              'coinsAvailable': FieldValue.increment(50),
+              'referral.totalReferrals': FieldValue.increment(1),
+            });
+          }
+        });
+      }
 
       // 3️⃣ NAVIGATE TO HOME
       if (mounted) {
@@ -246,6 +312,20 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                           prefixText: '+91 ',
                           prefixStyle: TextStyle(color: Colors.white),
                           counterText: '',
+                          border: InputBorder.none,
+                        ),
+                      ),
+                    ),
+
+                    // Referral Code
+                    glassInput(
+                      child: TextField(
+                        controller: referralController,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          hintText: 'Referral Code (Optional)',
+                          hintStyle: TextStyle(color: Colors.white70),
+                          prefixIcon: Icon(Icons.card_giftcard, color: Colors.white),
                           border: InputBorder.none,
                         ),
                       ),

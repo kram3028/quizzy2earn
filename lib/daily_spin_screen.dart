@@ -305,6 +305,9 @@ class _DailySpinScreenState extends State<DailySpinScreen>
       'freeSpinsUsed': FieldValue.increment(1),
     });
 
+    /// 🔥 UPDATE DAILY MISSION
+    await updateSpinMission();
+
     setState(() => freeSpinsUsed++);
   }
 
@@ -320,7 +323,26 @@ class _DailySpinScreenState extends State<DailySpinScreen>
       'rewardedSpinsUsed': FieldValue.increment(1),
     });
 
+    /// 🔥 UPDATE DAILY MISSION
+    await updateSpinMission();
+
     setState(() => rewardedSpinsUsed++);
+  }
+
+  Future<void> updateSpinMission() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final dailyRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('missions')
+        .doc('daily');
+
+    await dailyRef.set({
+      'spinUsed': FieldValue.increment(1),
+      'lastUpdated': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   String formatTime(Duration d) {

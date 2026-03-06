@@ -4,14 +4,12 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'dart:async';
-import 'package:flutter/services.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'widgets/bottom_banner_ad.dart';
-import 'screens/auth/welcome_screen.dart';
-import 'screens/home/home_screen.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
+import '../../screens/auth/auth_gate.dart';
+import 'dart:async';
 
 // 🔹 Glass input wrapper
 Widget glassInput({required Widget child}) {
@@ -100,8 +98,8 @@ class Quizzy2EarnApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
 
       navigatorKey: NavigationService.navigatorKey,
-      initialRoute: AppRouter.welcome,
       onGenerateRoute: AppRouter.generateRoute,
+      home: const AuthGate(),
 
       theme: ThemeData(
         primarySwatch: Colors.deepPurple,
@@ -118,35 +116,6 @@ class Quizzy2EarnApp extends StatelessWidget {
           elevation: 0,
         ),
       ),
-    );
-  }
-}
-
-class AuthGate extends StatelessWidget {
-  const AuthGate({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        // ⏳ Loading
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-
-        // 🔐 DOUBLE CHECK AUTH STATE
-        final user = FirebaseAuth.instance.currentUser;
-
-        if (user == null) {
-          return const WelcomeScreen();
-        }
-
-        // ✅ Valid logged-in user
-        return const HomeScreen();
-      },
     );
   }
 }

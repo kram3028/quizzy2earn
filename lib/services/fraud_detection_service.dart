@@ -20,6 +20,10 @@ class FraudDetectionService {
         'hardware': android.hardware,
         'fingerprint': android.fingerprint,
         'isPhysical': android.isPhysicalDevice,
+
+        /// 🔥 Emulator detection signals
+        'isEmulatorBrand': android.brand.toLowerCase().contains("generic"),
+        'isEmulatorModel': android.model.toLowerCase().contains("sdk"),
       };
     }
 
@@ -72,16 +76,47 @@ class FraudDetectionService {
   static Future<int> calculateRiskScore() async {
     int score = 0;
 
-    final isMulti = await detectMultiAccount();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return 0;
 
+    final isMulti = await detectMultiAccount();
     if (isMulti) score += 70;
 
     final device = await generateDeviceFingerprint();
 
-    if (device['isPhysical'] == false) {
-      score += 30; // emulator risk
+    if (device['isPhysical'] == false) score += 40;
+
+    final userDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get();
+
+    final fraudData = userDoc.data()?['fraud'] ?? {};
+
+    if (fraudData['vpn'] == true) {
+      score += 40;
     }
 
+    if (device['isEmulatorBrand'] == true) score += 20;
+    if (device['isEmulatorModel'] == true) score += 20;
+
+    /// Add more signals later
     return score;
+  }
+
+  static Future<void> updateFraudScore() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final score = await calculateRiskScore();
+
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      'fraud': {
+        'riskScore': score,
+        'isSuspicious': score > 60,
+        'isBlocked': score > 85,
+        'lastChecked': FieldValue.serverTimestamp(),
+      }
+    }, SetOptions(merge: true));
   }
 }

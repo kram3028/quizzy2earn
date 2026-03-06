@@ -9,6 +9,7 @@ import '../quiz_level_screen.dart';
 import '../daily_spin_screen.dart';
 import '../main.dart';
 import '../screens/withdraw/redeem_screen.dart';
+import 'package:quizzy2earn/screens/bonus/bonus_center_screen.dart';
 
 class AppRouter {
   static const String welcome = '/welcome';
@@ -21,6 +22,7 @@ class AppRouter {
   static const String reference = '/reference';
   static const String redeem = '/redeem';
   static const String quizLevel = '/quiz-level';
+  static const String bonus = '/bonus';
 
   static Route<dynamic> generateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -35,6 +37,9 @@ class AppRouter {
         
       case createAccount:
         return MaterialPageRoute(builder: (_) => const CreateAccountScreen());
+
+      case bonus:
+        return MaterialPageRoute(builder: (_) => const BonusCenterScreen());
 
       case levels:
         final args = settings.arguments as Map?;

@@ -327,19 +327,48 @@ class _ProfileTabState extends State<ProfileTab> {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .update({
-      'name': nameController.text.trim(),
-      'phone': phoneController.text.trim(),
-      'dob': dobController.text.trim(),
-      'gender': selectedGender,
-    });
+    final userRef =
+    FirebaseFirestore.instance.collection('users').doc(user.uid);
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Profile updated')),
-    );
+    final dailyMissionRef =
+    userRef.collection('missions').doc('daily');
+
+    final weeklyMissionRef =
+    userRef.collection('missions').doc('weekly');
+
+    try {
+      /// ✅ 1️⃣ Save profile
+      await userRef.update({
+        'name': nameController.text.trim(),
+        'phone': phoneController.text.trim(),
+        'dob': dobController.text.trim(),
+        'gender': selectedGender,
+      });
+
+      /// ✅ 2️⃣ Check email verified again (important)
+      await user.reload();
+      final isVerified = user.emailVerified;
+
+      /// ✅ 3️⃣ Update DAILY mission (email + profile)
+      await dailyMissionRef.set({
+        'profileSaved': true,
+        'emailVerified': isVerified,
+        'lastUpdated': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      /// ✅ 4️⃣ Update WEEKLY mission (retention tracking)
+      await weeklyMissionRef.set({
+        'daysActive': FieldValue.increment(1),
+      }, SetOptions(merge: true));
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profile updated')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    }
   }
 
   Future<void> logoutUser() async {

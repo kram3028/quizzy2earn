@@ -188,13 +188,18 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
   Future<void> completeLevel() async {
     final user = FirebaseAuth.instance.currentUser!;
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .update({
-      'completedLevels': FieldValue.arrayUnion([widget.level]),
-      'currentLevel': widget.level + 1,
+    final userRef =
+    FirebaseFirestore.instance.collection('users').doc(user.uid);
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      tx.update(userRef, {
+        'completedLevels': FieldValue.arrayUnion([widget.level]),
+        'currentLevel': widget.level + 1,
+      });
     });
+
+    /// 🔥 UPDATE DAILY + WEEKLY QUIZ MISSIONS
+    await updateQuizMission();
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('🎉 Level ${widget.level} Completed!')),
@@ -232,6 +237,42 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
         },
       ),
     );
+  }
+
+  Future<void> updateQuizMission() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final dailyRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('missions')
+        .doc('daily');
+
+    final weeklyRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('missions')
+        .doc('weekly');
+
+    await FirebaseFirestore.instance.runTransaction((tx) async {
+      tx.set(
+        dailyRef,
+        {
+          'quizCompleted': FieldValue.increment(1),
+          'lastUpdated': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+
+      tx.set(
+        weeklyRef,
+        {
+          'quizCompleted': FieldValue.increment(1),
+        },
+        SetOptions(merge: true),
+      );
+    });
   }
 
   @override

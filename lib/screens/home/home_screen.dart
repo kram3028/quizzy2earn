@@ -10,6 +10,7 @@ import 'package:confetti/confetti.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
+import '../bonus/bonus_center_screen.dart';
 
 import '../../ads/ad_helper.dart';
 import '../../widgets/bottom_banner_ad.dart';
@@ -39,7 +40,7 @@ class _HomeScreenState extends State<HomeScreen>
   StreamSubscription<DocumentSnapshot>? userSubscription;
   StreamSubscription<QuerySnapshot>? withdrawSubscription;
   Map<String, dynamic>? latestWithdrawRequest;
-  String currentTermsVersion = 'v1';
+  String currentTermsVersion = '1.0';
   bool get hasPendingWithdraw =>
       latestWithdrawRequest != null &&
           latestWithdrawRequest!['status'] == 'pending';
@@ -51,6 +52,7 @@ class _HomeScreenState extends State<HomeScreen>
   int quizCounterForInterstitial = 0;
   int quizStartCount = 0;
   int questionAdCounter = 0;
+  bool _termsChecked = false;
 
   final String sheetUrl =
       'https://script.google.com/macros/s/AKfycbx2INUKrRWYjmyGCQBjP180T_RLZcLwKfn_vA1NLMGmEV52-5B3udzdSI4NEPcY9l58/exec';
@@ -61,13 +63,9 @@ class _HomeScreenState extends State<HomeScreen>
   void initState() {
     super.initState();
 
-    verifyUserStillExists();
-
     loadQuestionsFromSheet(); // ❓ Load quiz questions
 
-    loadCurrentTermsVersion();
-
-    startUserRealtimeListener(); // 🔴 REAL-TIME
+    initTermsAndListeners();
 
     startWithdrawRealtimeListener();
 
@@ -90,6 +88,30 @@ class _HomeScreenState extends State<HomeScreen>
     _loadRewardedInterstitialAd();
 
     _loadSpinOpenAd();
+
+    resetDailyMissionIfNeeded();
+
+    saveIpAddress();
+
+    FraudDetectionService.saveFingerprint();
+    FraudDetectionService.updateFraudScore();
+  }
+
+  Future<void> initTermsAndListeners() async {
+    await loadCurrentTermsVersion(); // 🔥 wait for version
+    startUserRealtimeListener();
+  }
+
+  static Future<void> saveIpAddress() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final res = await http.get(Uri.parse("https://api64.ipify.org?format=json"));
+    final ip = jsonDecode(res.body)['ip'];
+
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+      'lastIp': ip,
+    }, SetOptions(merge: true));
   }
 
   void _loadRewardedInterstitialAd() {
@@ -126,6 +148,34 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Future<void> resetDailyMissionIfNeeded() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final today = DateTime.now().toIso8601String().split("T")[0];
+
+    final dailyRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('missions')
+        .doc('daily');
+
+    final snap = await dailyRef.get();
+
+    /// 🔥 If first time OR new day → reset mission
+    if (!snap.exists || snap['date'] != today) {
+      await dailyRef.set({
+        'date': today,
+        'quizCompleted': 0,
+        'spinUsed': 0,
+        'appOpened': true,
+        'profileSaved': false,
+        'rewardClaimed': false,
+        'lastUpdated': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    }
+  }
+
   void _showRewardedInterstitialThen(VoidCallback onContinue) {
     if (_rewardedInterstitialAd != null) {
       _rewardedInterstitialAd!.fullScreenContentCallback =
@@ -150,21 +200,6 @@ class _HomeScreenState extends State<HomeScreen>
     } else {
       // If ad not ready → continue normally
       onContinue();
-    }
-  }
-
-  Future<void> verifyUserStillExists() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    final doc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .get();
-
-    if (!doc.exists) {
-      // 🚨 Profile deleted by admin → force logout
-      await FirebaseAuth.instance.signOut();
     }
   }
 
@@ -231,15 +266,17 @@ class _HomeScreenState extends State<HomeScreen>
       final data = doc.data();
       if (data == null) return;
 
-      final agreedVersion = data['agreedTermsVersion'];
+      final agreedVersion = data['agreedTermsVersion'] ?? '1.0';
 
       setState(() {
         coinsAvailable = (data['coinsAvailable'] as num?)?.toInt() ?? 0;
         coinsLocked = (data['coinsLocked'] as num?)?.toInt() ?? 0;
       });
 
-      // 🔥 FORCE RE-AGREE WHEN TERMS VERSION CHANGES
-      if (agreedVersion != currentTermsVersion) {
+      // 🔥 Prevent multiple popup + correct check
+      if (!_termsChecked &&
+          agreedVersion != currentTermsVersion) {
+        _termsChecked = true;
         _forceTermsAgreement();
       }
     });
@@ -458,6 +495,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     if (selectedTabIndex == 0) {
       currentScreen = buildHomeTab();
+
     } else if (selectedTabIndex == 1) {
       currentScreen = WalletTab(
         coinsAvailable: coinsAvailable,
@@ -483,13 +521,21 @@ class _HomeScreenState extends State<HomeScreen>
           }
         },
       );
+
     } else if (selectedTabIndex == 2) {
       currentScreen = WithdrawTab(
         latestWithdrawRequest: latestWithdrawRequest,
         confettiController: _confettiController,
       );
-    } else {
+
+    } else if (selectedTabIndex == 3) {
       currentScreen = buildProfileTab();
+
+    } else if (selectedTabIndex == 4) {
+      currentScreen = const BonusCenterScreen();
+
+    } else {
+      currentScreen = buildHomeTab();
     }
 
     return Scaffold(
@@ -519,6 +565,7 @@ class _HomeScreenState extends State<HomeScreen>
               BottomNavigationBarItem(icon: Icon(Icons.account_balance_wallet), label: 'My Wallet'),
               BottomNavigationBarItem(icon: Icon(Icons.payments), label: 'Withdraw'),
               BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+              BottomNavigationBarItem(icon: Icon(Icons.card_giftcard), label: 'Bonus'),
             ],
           ),
         ],

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:flutter/services.dart';
@@ -24,6 +25,12 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
   int referralCount = 0;
   RewardedAd? _rewardedAd;
   bool rewardedAdReady = false;
+
+  bool emailVerified = false;
+  bool profileSaved = false;
+
+  bool emailRewardClaimed = false;
+  bool profileRewardClaimed = false;
 
   final user = FirebaseAuth.instance.currentUser;
 
@@ -50,6 +57,13 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
     final daily = data['dailyLogin'] ?? {};
     final referral = data['referral'] ?? {};
     final bonus = data['bonus'] ?? {};
+    emailVerified = data['emailVerified'] ?? false;
+    profileSaved = data['profileSaved'] ?? false;
+
+    final rewards = data['oneTimeRewards'] ?? {};
+
+    emailRewardClaimed = rewards['emailVerifiedRewardClaimed'] ?? false;
+    profileRewardClaimed = rewards['profileRewardClaimed'] ?? false;
 
     currentStreak = daily['streak'] ?? 0;
     weeklyEarned = bonus['weeklyEarned'] ?? 0;
@@ -118,48 +132,50 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
 
   /// 🔥 DAILY LOGIN CLAIM
   Future<void> claimDailyBonus() async {
-    if (!canClaimToday || user == null) return;
 
-    final rewards = [10, 20, 30, 50, 80, 120, 150];
+    final callable =
+    FirebaseFunctions.instance.httpsCallable('claimDailyLogin');
 
-    final userRef =
-    FirebaseFirestore.instance.collection('users').doc(user!.uid);
-
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      final snap = await tx.get(userRef);
-      final data = snap.data() ?? {};
-
-      final daily = data['dailyLogin'] ?? {};
-      final lastClaim = daily['lastClaim'] as Timestamp?;
-
-      int streak = daily['streak'] ?? 0;
-
-      /// Soft reset
-      if (lastClaim != null) {
-        final diff =
-            DateTime.now().difference(lastClaim.toDate()).inHours;
-        if (diff > 48) {
-          streak = 0;
-        }
-      }
-
-      streak = (streak + 1).clamp(1, 7);
-
-      final reward = rewards[streak - 1];
-
-      tx.update(userRef, {
-        'coinsAvailable': FieldValue.increment(reward),
-        'dailyLogin.streak': streak,
-        'dailyLogin.lastClaim': FieldValue.serverTimestamp(),
-        'bonus.weeklyEarned': FieldValue.increment(reward),
-      });
-    });
+    await callable.call();
 
     await loadBonusData();
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Daily bonus claimed!')),
     );
+
+  }
+
+  Future<void> _claimReward(String rewardType) async {
+
+    try {
+
+      final result = await FirebaseFunctions.instance
+          .httpsCallable('claimOneTimeReward')
+          .call({
+        "rewardType": rewardType
+      });
+
+      final reward = result.data["reward"];
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("You received $reward coins 🎉")),
+      );
+
+      loadBonusData();
+
+    } catch (e) {
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Reward already claimed or unavailable")),
+      );
+
+    }
+
   }
 
   /// 🔥 GENERATE REFERRAL CODE
@@ -226,11 +242,17 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
               children: [
                 _summaryCard(),
                 const SizedBox(height: 16),
+
                 _dailyLoginCard(),
                 const SizedBox(height: 16),
+
                 _referralCard(),
                 const SizedBox(height: 16),
+
                 _missionCard(),
+                const SizedBox(height: 16),
+
+                _oneTimeRewardsCard(),
               ],
             ),
           ),
@@ -241,15 +263,92 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
 
   /// ⭐ SUMMARY
   Widget _summaryCard() {
-    return Card(
-      child: ListTile(
-        title: const Text("Bonus Coins Earned This Week"),
-        trailing: Text(
-          "$weeklyEarned",
-          style: const TextStyle(
-              fontWeight: FontWeight.bold, fontSize: 18),
-        ),
-      ),
+    if (user == null) return const SizedBox();
+
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(user!.uid)
+          .snapshots(),
+      builder: (context, snapshot) {
+
+        if (!snapshot.hasData) {
+          return const Card(
+            child: Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+          );
+        }
+
+        final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+
+        final walletCoins = data['coinsAvailable'] ?? 0;
+        final weekly = data['bonus']?['weeklyEarned'] ?? 0;
+
+        return Card(
+          elevation: 4,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+
+                Column(
+                  children: [
+                    const Text(
+                      "Weekly Earned",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      "$weekly",
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.deepPurple,
+                      ),
+                    ),
+                  ],
+                ),
+
+                Container(
+                  width: 1,
+                  height: 40,
+                  color: Colors.grey.shade300,
+                ),
+
+                Column(
+                  children: [
+                    const Text(
+                      "Wallet Balance",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      "$walletCoins",
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -416,8 +515,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
 
         final quiz = data['quizCompleted'] ?? 0;
         final spin = data['spinUsed'] ?? 0;
-        final profileSaved = data['profileSaved'] ?? false;
-        final emailVerified = data['emailVerified'] ?? false;
         final appOpened = data['appOpened'] ?? false;
 
         return Card(
@@ -450,11 +547,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
                 ),
 
                 _missionItem(
-                  "Verify email and save profile",
-                  profileSaved && emailVerified,
-                ),
-
-                _missionItem(
                   "Open app 3 consecutive days",
                   appOpened,
                 ),
@@ -463,6 +555,58 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
           ),
         );
       },
+    );
+  }
+
+  Widget _oneTimeRewardsCard() {
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+
+          const Row(
+            children: [
+              Icon(Icons.card_giftcard, color: Colors.white),
+              SizedBox(width: 8),
+              Text(
+                "One-Time Rewards",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Colors.white,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 10),
+
+          _oneTimeRewardItem(
+            title: "Verify Email",
+            completed: emailVerified,
+            claimed: emailRewardClaimed,
+            rewardType: "email",
+            coins: 100,
+          ),
+
+          _oneTimeRewardItem(
+            title: "Complete Profile",
+            completed: profileSaved,
+            claimed: profileRewardClaimed,
+            rewardType: "profile",
+            coins: 150,
+          ),
+        ],
+      ),
     );
   }
 
@@ -489,6 +633,55 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
             ),
           ),
           if (!done) const Icon(Icons.lock, color: Colors.white70),
+        ],
+      ),
+    );
+  }
+
+  Widget _oneTimeRewardItem({
+    required String title,
+    required bool completed,
+    required bool claimed,
+    required String rewardType,
+    required int coins,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        children: [
+
+          Icon(
+            completed ? Icons.check_circle : Icons.lock,
+            color: completed ? Colors.greenAccent : Colors.white,
+          ),
+
+          const SizedBox(width: 10),
+
+          Expanded(
+            child: Text(
+              "$title ($coins coins)",
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+
+          if (claimed)
+            const Text(
+              "Claimed",
+              style: TextStyle(color: Colors.greenAccent),
+            )
+          else
+            ElevatedButton(
+              onPressed: completed
+                  ? () => _claimReward(rewardType)
+                  : null,
+              child: const Text("Claim"),
+            ),
         ],
       ),
     );

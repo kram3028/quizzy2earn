@@ -4,76 +4,107 @@ import 'package:quizzy2earn/services/fraud_detection_service.dart';
 
 class WithdrawService {
   static Future<void> createWithdrawRequest({
-    required double amount,
+    required double amount, // ₹ amount
     required String payoutMethod,
     required String payoutDetail,
   }) async {
+
     final user = FirebaseAuth.instance.currentUser;
+
     if (user == null) {
       throw Exception('User not logged in');
     }
 
-    /// Fraud check
+    /// 🔎 FRAUD CHECK
     final risk = await FraudDetectionService.calculateRiskScore();
 
-    if (risk >=70) {
+    if (risk >= 70) {
       throw Exception('Fraud risk detected. Withdraw blocked.');
     }
 
-    final userRef =
-    FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final db = FirebaseFirestore.instance;
 
-    await FirebaseFirestore.instance.runTransaction((tx) async {
+    final userRef = db.collection('users').doc(user.uid);
+
+    /// 🔹 READ COIN VALUE FROM FIRESTORE
+    final configSnap =
+    await db.collection('app_config').doc('coin_settings').get();
+
+    if (!configSnap.exists) {
+      throw Exception('Coin value config missing');
+    }
+
+    final config = configSnap.data() ?? {};
+
+    final coinValue = (config['coinValue'] ?? 0.8).toDouble();
+
+    /// convert ₹ → coins
+    final coinsRequired = (amount / coinValue).ceil();
+
+    await db.runTransaction((tx) async {
+
       final userSnap = await tx.get(userRef);
 
       if (!userSnap.exists) {
         throw Exception('User not found');
       }
 
-      final data = userSnap.data()!;
+      final data = userSnap.data() ?? {};
 
-      final available = (data['coinsAvailable'] as num).toInt();
-      final locked = (data['coinsLocked'] as num).toInt();
+      final availableCoins = (data['coinsAvailable'] ?? 0).toInt();
+      final lockedCoins = (data['coinsLocked'] ?? 0).toInt();
 
-      /// 🔐 ANTI-FRAUD LAYER
-      if (locked > 0) {
+      /// 🔐 ANTI-FRAUD: prevent multiple withdraw
+      if (lockedCoins > 0) {
         throw Exception('Pending withdrawal exists');
       }
 
-      if (available < amount) {
+      /// 🔐 CHECK BALANCE
+      if (availableCoins < coinsRequired) {
         throw Exception('Insufficient balance');
       }
 
-      /// 🔐 MAX LIMIT PROTECTION
+      /// 🔐 MAX LIMIT
       if (amount > 20000) {
         throw Exception('Maximum withdrawal limit exceeded');
       }
 
-      /// 🔐 SUSPICIOUS USER CHECK
+      /// 🔐 SUSPICIOUS USER
       if (data['suspended'] == true) {
         throw Exception('Account suspended');
       }
 
-      /// 🔒 LOCK COINS
+      /// 🔒 LOCK COINS (NOT ₹)
       tx.update(userRef, {
-        'coinsAvailable': available - amount,
-        'coinsLocked': locked + amount,
+        'coinsAvailable': availableCoins - coinsRequired,
+        'coinsLocked': lockedCoins + coinsRequired,
       });
 
-      /// 🔥 CREATE WITHDRAW
+      /// 🔥 CREATE WITHDRAW REQUEST
       final withdrawRef =
-      FirebaseFirestore.instance.collection('withdraw_requests').doc();
+      db.collection('withdraw_requests').doc();
 
       tx.set(withdrawRef, {
         'userId': user.uid,
+
+        /// ₹ amount requested
         'requestedAmount': amount,
+
+        /// coins consumed
+        'coinsUsed': coinsRequired,
+
+        /// coin value used
+        'coinValue': coinValue,
+
         'payoutMethod': payoutMethod,
         'payoutDetail': payoutDetail,
         'status': 'pending',
+        'rejectReason': "",
         'coinsSettled': false,
         'createdAt': FieldValue.serverTimestamp(),
         'createdAtLocal': DateTime.now().millisecondsSinceEpoch,
       });
+
     });
   }
 }

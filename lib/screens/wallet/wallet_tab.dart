@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
 import 'package:quizzy2earn/screens/faq/faq_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class WalletTab extends StatelessWidget {
   final int coinsAvailable;
   final int coinsLocked;
   final bool hasPendingWithdraw;
-  final String currentTermsVersion;
 
   final Function(VoidCallback) onShowAdThen;
 
@@ -22,7 +23,6 @@ class WalletTab extends StatelessWidget {
     required this.coinsAvailable,
     required this.coinsLocked,
     required this.hasPendingWithdraw,
-    required this.currentTermsVersion,
     required this.onWithdraw,
     required this.onShowAdThen,
   });
@@ -173,19 +173,50 @@ class WalletTab extends StatelessWidget {
               ),
               onPressed: coinsAvailable < 5000
                   ? null
-                  : () {
+                  : () async {
+
+                final uid = FirebaseAuth.instance.currentUser?.uid;
+                if (uid == null) return;
+
+                final userDoc = await FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(uid)
+                    .get();
+
+                final termsDoc = await FirebaseFirestore.instance
+                    .collection('app_config')
+                    .doc('terms')
+                    .get();
+
+                final agreedVersion = userDoc.data()?['agreedTermsVersion'];
+                final currentVersion = termsDoc.data()?['currentVersion'];
+
+                /// Terms outdated
+                if (agreedVersion != currentVersion) {
+
+                  NavigationService.pushNamed(
+                    AppRouter.terms,
+                    args: {
+                      "currentTermsVersion": currentVersion,
+                    },
+                  );
+
+                  return;
+                }
+
+                /// Terms already accepted
                 onShowAdThen(() {
                   NavigationService.pushNamed(
                     AppRouter.redeem,
                     args: {
                       'coins': coinsAvailable,
                       'hasPendingWithdraw': hasPendingWithdraw,
-                      'currentTermsVersion': currentTermsVersion,
                       'onShowAdThen': onShowAdThen,
                       'onWithdraw': onWithdraw,
                     },
                   );
                 });
+
               },
             ),
           ),
@@ -223,6 +254,7 @@ class WalletTab extends StatelessWidget {
                   'Check common questions about payment, pending withdrawals, and account safety.',
                   style: TextStyle(fontSize: 13, color: Colors.black54),
                 ),
+
                 const SizedBox(height: 12),
 
                 /// 🔘 FAQ BUTTON
@@ -246,6 +278,27 @@ class WalletTab extends StatelessWidget {
                           builder: (_) => const FAQScreen(),
                         ),
                       );
+                    },
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.support_agent),
+                    label: const Text('Contact Support'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.black87,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: () {
+                      NavigationService.pushNamed('/support');
                     },
                   ),
                 ),

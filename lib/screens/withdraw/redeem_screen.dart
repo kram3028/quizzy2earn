@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:quizzy2earn/screens/terms/terms_conditions_screen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../widgets/bottom_banner_ad.dart';
 import 'package:quizzy2earn/core/app_theme.dart';
@@ -38,7 +37,9 @@ class _RedeemScreenState extends State<RedeemScreen> {
   final TextEditingController upiIdController = TextEditingController();
   final TextEditingController giftCardEmailController = TextEditingController();
   final TextEditingController withdrawCoinsController = TextEditingController();
-  static const double minWithdrawAmount = 4000;
+  double minWithdrawAmount = 4000;
+  double maxWithdrawAmount = 20000;
+  double coinValue = 0.8;
 
   // 🟢 STEP 1: STATE VARIABLES
   String selectedPayoutCategory = 'UPI'; // UPI | GiftCard
@@ -49,6 +50,7 @@ class _RedeemScreenState extends State<RedeemScreen> {
   @override
   void initState() {
     super.initState();
+    listenCoinValue();
     _showTermsIfFirstTime();
     withdrawCoinsController.addListener(() {
       setState(() {}); // rebuild to update red border + button state
@@ -76,9 +78,38 @@ class _RedeemScreenState extends State<RedeemScreen> {
     }
   }
 
+  void listenCoinValue() {
+
+    FirebaseFirestore.instance
+        .collection('app_config')
+        .doc('coin_settings')
+        .snapshots()
+        .listen((doc) {
+
+      if (!doc.exists) return;
+
+      final data = doc.data();
+      if (data == null) return;
+
+      setState(() {
+
+        coinValue = (data['coinValue'] ?? 0.8).toDouble();
+
+        minWithdrawAmount =
+            (data['minWithdraw'] ?? 4000).toDouble();
+
+        maxWithdrawAmount =
+            (data['maxWithdraw'] ?? 20000).toDouble();
+
+      });
+
+    });
+
+  }
+
   @override
   Widget build(BuildContext context) {
-    final double coinToRupeeRate = 0.8; // internal only (hidden)
+    final double coinToRupeeRate = coinValue; // internal only (hidden)
     final double rewardAmount = widget.coins * coinToRupeeRate;
     final enteredAmount =
         double.tryParse(withdrawCoinsController.text.trim()) ?? 0;
@@ -186,7 +217,7 @@ class _RedeemScreenState extends State<RedeemScreen> {
                         controller: withdrawCoinsController,
                         keyboardType: TextInputType.number,
                         decoration: InputDecoration(
-                          hintText: 'Minimum ₹4000',
+                          hintText: 'Minimum ₹${minWithdrawAmount.toStringAsFixed(0)}',
                           prefixText: '₹ ',
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -205,10 +236,10 @@ class _RedeemScreenState extends State<RedeemScreen> {
                         ),
                       ),
                       if (!isAmountValid && withdrawCoinsController.text.isNotEmpty)
-                        const Padding(
+                        Padding(
                           padding: EdgeInsets.only(top: 6),
                           child: Text(
-                            'Minimum withdraw amount is ₹4000',
+                            'Minimum withdraw amount is ₹${minWithdrawAmount.toStringAsFixed(0)}',
                             style: TextStyle(color: Colors.red, fontSize: 12),
                           ),
                         ),
@@ -413,19 +444,6 @@ class _RedeemScreenState extends State<RedeemScreen> {
                           }
                           payoutMethod = 'GiftCard';
                           payoutDetail = giftCardEmailController.text.trim();
-                        }
-
-                        // ✅ SAVE TERMS AGREEMENT
-                        final user = FirebaseAuth.instance.currentUser;
-                        if (user != null) {
-                          await FirebaseFirestore.instance
-                              .collection('users')
-                              .doc(user.uid)
-                              .update({
-                            'agreedToTerms': true,
-                            'agreedTermsVersion': widget.currentTermsVersion,
-                            'termsAgreedAt': FieldValue.serverTimestamp(),
-                          });
                         }
 
                         NavigationService.goBack();

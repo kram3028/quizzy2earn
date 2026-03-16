@@ -8,6 +8,7 @@ import 'package:quizzy2earn/core/navigation_service.dart';
 import 'ads/ad_helper.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'widgets/bottom_banner_ad.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 String get todayDocId {
   final now = DateTime.now();
@@ -101,13 +102,15 @@ class _DailySpinScreenState extends State<DailySpinScreen>
   }
 
   Future<void> _addCoins(int coins) async {
-    final user = FirebaseAuth.instance.currentUser!;
-    final ref =
-    FirebaseFirestore.instance.collection('users').doc(user.uid);
 
-    await ref.update({
-      'coinsAvailable': FieldValue.increment(coins),
+    final callable =
+    FirebaseFunctions.instance.httpsCallable('claimGameReward');
+
+    await callable.call({
+      "coins": coins,
+      "source": "spin"
     });
+
   }
 
   void _spinWheel({required bool rewarded}) async {

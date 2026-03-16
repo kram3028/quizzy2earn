@@ -45,7 +45,7 @@ class FAQScreen extends StatelessWidget {
           FAQItem(
             question: "How can I contact support?",
             answer:
-            "You can contact support through the Help section or email support@quizzy2earn.com.",
+            "You can contact support through the Help section or email support@quizzy2earn.in.",
           ),
         ],
       ),

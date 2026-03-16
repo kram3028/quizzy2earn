@@ -19,6 +19,7 @@ import '../withdraw/withdraw_tab.dart';
 import '../withdraw/withdraw_service.dart';
 import '../../services/fraud_detection_service.dart';
 import '../profile/profile_tab.dart';
+import '../survey/survey_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -40,7 +41,6 @@ class _HomeScreenState extends State<HomeScreen>
   StreamSubscription<DocumentSnapshot>? userSubscription;
   StreamSubscription<QuerySnapshot>? withdrawSubscription;
   Map<String, dynamic>? latestWithdrawRequest;
-  String currentTermsVersion = '1.0';
   bool get hasPendingWithdraw =>
       latestWithdrawRequest != null &&
           latestWithdrawRequest!['status'] == 'pending';
@@ -52,7 +52,6 @@ class _HomeScreenState extends State<HomeScreen>
   int quizCounterForInterstitial = 0;
   int quizStartCount = 0;
   int questionAdCounter = 0;
-  bool _termsChecked = false;
 
   final String sheetUrl =
       'https://script.google.com/macros/s/AKfycbx2INUKrRWYjmyGCQBjP180T_RLZcLwKfn_vA1NLMGmEV52-5B3udzdSI4NEPcY9l58/exec';
@@ -65,7 +64,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     loadQuestionsFromSheet(); // ❓ Load quiz questions
 
-    initTermsAndListeners();
+    startUserRealtimeListener();
 
     startWithdrawRealtimeListener();
 
@@ -92,14 +91,6 @@ class _HomeScreenState extends State<HomeScreen>
     resetDailyMissionIfNeeded();
 
     saveIpAddress();
-
-    FraudDetectionService.saveFingerprint();
-    FraudDetectionService.updateFraudScore();
-  }
-
-  Future<void> initTermsAndListeners() async {
-    await loadCurrentTermsVersion(); // 🔥 wait for version
-    startUserRealtimeListener();
   }
 
   static Future<void> saveIpAddress() async {
@@ -263,34 +254,17 @@ class _HomeScreenState extends State<HomeScreen>
         .snapshots()
         .listen((doc) {
       if (!doc.exists) return;
+
       final data = doc.data();
       if (data == null) return;
-
-      final agreedVersion = data['agreedTermsVersion'] ?? '1.0';
 
       setState(() {
         coinsAvailable = (data['coinsAvailable'] as num?)?.toInt() ?? 0;
         coinsLocked = (data['coinsLocked'] as num?)?.toInt() ?? 0;
       });
-
-      // 🔥 Prevent multiple popup + correct check
-      if (!_termsChecked &&
-          agreedVersion != currentTermsVersion) {
-        _termsChecked = true;
-        _forceTermsAgreement();
-      }
+      debugPrint("CoinsAvailable: ${data['coinsAvailable']}");
+      /// ❌ Removed force terms check
     });
-  }
-
-  Future<void> loadCurrentTermsVersion() async {
-    final doc = await FirebaseFirestore.instance
-        .collection('app_config')
-        .doc('terms')
-        .get();
-
-    if (doc.exists) {
-      currentTermsVersion = doc['currentVersion'] ?? '1.0';
-    }
   }
 
   void startWithdrawRealtimeListener() {
@@ -416,36 +390,6 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
-  void _forceTermsAgreement() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      showDialog(
-        context: context,
-        barrierDismissible: false, // 🚨 MUST accept
-        builder: (_) => AlertDialog(
-          title: const Text('Terms Updated'),
-          content: const Text(
-            'Our Terms & Conditions have been updated. Please review and agree to continue using withdrawals.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                NavigationService.goBack();
-                NavigationService.pushNamed(
-                  AppRouter.terms,
-                  args: {
-                    'forceAgree': true,
-                    'currentTermsVersion': currentTermsVersion,
-                  }
-                );
-              },
-              child: const Text('Review & Agree'),
-            ),
-          ],
-        ),
-      );
-    });
-  }
-
   Future<void> addBonusCoins(int amount) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -501,7 +445,6 @@ class _HomeScreenState extends State<HomeScreen>
         coinsAvailable: coinsAvailable,
         coinsLocked: coinsLocked,
         hasPendingWithdraw: hasPendingWithdraw,
-        currentTermsVersion: currentTermsVersion,
         onShowAdThen: _showRewardedInterstitialThen,
         onWithdraw: (amount, payoutMethod, payoutDetail) async {
           try {
@@ -744,10 +687,24 @@ class _HomeScreenState extends State<HomeScreen>
 
                   const SizedBox(height: 14),
 
-                  _comingSoonCard(
-                    icon: Icons.poll,
-                    title: 'Surveys (BitLabs)',
-                    subtitle: 'Complete surveys & earn big rewards',
+                  GestureDetector(
+                    onTap: () {
+
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const SurveyScreen(),
+                        ),
+                      );
+
+                    },
+
+                    child: _gameCard(
+                      icon: Icons.poll,
+                      title: 'Survey & Offerwalls',
+                      subtitle: 'Complete surveys & earn coins',
+                      colors: const [Colors.blue, Colors.indigo],
+                    ),
                   ),
 
                   const SizedBox(height: 14),

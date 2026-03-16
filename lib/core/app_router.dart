@@ -10,6 +10,7 @@ import '../daily_spin_screen.dart';
 import '../main.dart';
 import '../screens/withdraw/redeem_screen.dart';
 import 'package:quizzy2earn/screens/bonus/bonus_center_screen.dart';
+import '../screens/support/support_screen.dart';
 
 class AppRouter {
   static const String welcome = '/welcome';
@@ -40,6 +41,9 @@ class AppRouter {
 
       case bonus:
         return MaterialPageRoute(builder: (_) => const BonusCenterScreen());
+
+      case '/support':
+        return MaterialPageRoute(builder: (_) => const SupportScreen(),);
 
       case levels:
         final args = settings.arguments as Map?;

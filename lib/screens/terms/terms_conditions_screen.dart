@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class TermsConditionsScreen extends StatefulWidget {
   final bool forceAgree;
@@ -40,9 +42,40 @@ class _TermsConditionsScreenState extends State<TermsConditionsScreen> {
   }
 
   Future<void> _agreeToTerms() async {
-    // During signup user is not logged in
-    // So just return success and go back
-    NavigationService.goBack(true);
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      NavigationService.goBack(true);
+      return;
+    }
+
+    setState(() => isSaving = true);
+
+    try {
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({
+        'agreedToTerms': true,
+        'agreedTermsVersion': widget.currentTermsVersion,
+      }, SetOptions(merge: true));
+
+      NavigationService.goBack(true);
+
+    } catch (e) {
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save agreement')),
+      );
+
+    } finally {
+
+      if (mounted) {
+        setState(() => isSaving = false);
+      }
+
+    }
   }
 
   @override

@@ -1,12 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:device_info_plus/device_info_plus.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
-import 'dart:io';
-
 import '../../widgets/bottom_banner_ad.dart';
 import 'package:quizzy2earn/core/app_theme.dart';
 
@@ -110,31 +105,7 @@ class _LoginScreenState extends State<LoginScreen>
 
       final user = userCredential.user!;
 
-      // 📱 DEVICE INFO
-      final deviceInfo = DeviceInfoPlugin();
-      String platform = Platform.isAndroid ? 'Android' : 'iOS';
-      String model = 'Unknown';
-
-      if (Platform.isAndroid) {
-        final android = await deviceInfo.androidInfo;
-        model = android.model;
-      } else if (Platform.isIOS) {
-        final ios = await deviceInfo.iosInfo;
-        model = ios.utsname.machine;
-      }
-
-      final packageInfo = await PackageInfo.fromPlatform();
-
-      // 🟢 SAVE LOGIN + DEVICE INFO
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .update({
-        'lastLogin': FieldValue.serverTimestamp(),
-        'devicePlatform': platform,
-        'deviceModel': model,
-        'appVersion': packageInfo.version,
-      });
+      debugPrint("Logged in user: ${user.uid}");
 
       // 🚀 NAVIGATE AFTER SUCCESS
       if (mounted) {

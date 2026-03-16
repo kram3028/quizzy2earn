@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
@@ -76,15 +77,15 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   }
 
   Future<void> addCoin() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
 
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .update({
-      'coinsAvailable': FieldValue.increment(1),
+    final callable =
+    FirebaseFunctions.instance.httpsCallable('claimGameReward');
+
+    await callable.call({
+      "coins": 1,
+      "source": "quiz"
     });
+
   }
 
   Future<void> addBonusCoins() async {
@@ -100,25 +101,15 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   }
 
   Future<void> addCoinsToUser(int coins) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
 
-    final ref = FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid);
+    final callable =
+    FirebaseFunctions.instance.httpsCallable('claimGameReward');
 
-    await FirebaseFirestore.instance.runTransaction((tx) async {
-      final snap = await tx.get(ref);
-
-      if (!snap.exists) return;
-
-      final currentCoins =
-          (snap.data()?['coinsAvailable'] as num?)?.toInt() ?? 0;
-
-      tx.update(ref, {
-        'coinsAvailable': currentCoins + coins,
-      });
+    await callable.call({
+      "coins": coins,
+      "source": "quiz_bonus"
     });
+
   }
 
   void checkAnswer(String selected) async {

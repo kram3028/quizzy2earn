@@ -1,11 +1,59 @@
 const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { onCall } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const axios = require("axios");
+const functions = require("firebase-functions");
 
 admin.initializeApp();
+
+exports.generateWithdrawTransactionId = onDocumentCreated(
+  {
+    document: "withdraw_requests/{withdrawId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const snap = event.data;
+    const data = snap.data();
+
+    const withdrawId = event.params.withdrawId;
+    const uid = data.userId;
+
+    const now = Date.now();
+
+    // 🔒 Secure internal ID
+    const transactionId =
+      `TX-${uid.substring(0,6)}-${withdrawId.substring(0,6)}-${now}`;
+
+    // 📅 Support friendly ID
+    const date = new Date();
+    const datePart =
+      date.getFullYear().toString().slice(2) +
+      String(date.getMonth()+1).padStart(2,'0') +
+      String(date.getDate()).padStart(2,'0');
+
+    const todayStart = new Date(date.setHours(0,0,0,0));
+
+    const todaySnapshot = await admin.firestore()
+      .collection("withdraw_requests")
+      .where("createdAt", ">=", todayStart)
+      .get();
+
+    const count = todaySnapshot.size + 1;
+
+    const supportId =
+      `TX${datePart}-${String(count).padStart(5,'0')}`;
+
+    await snap.ref.update({
+      transactionId,
+      supportId
+    });
+
+  }
+);
 
 /**
  * 🔥 AUTO SETTLE COINS AFTER ADMIN ACTION
@@ -27,7 +75,7 @@ exports.onWithdrawStatusChange = onDocumentUpdated(
     if (after.coinsSettled === true) return;
 
     const userId = after.userId;
-    const amount = Number(after.requestedAmount);
+    const coinsUsed = Number(after.coinsUsed || 0);
 
     const userRef = admin.firestore().collection("users").doc(userId);
     const withdrawRef = event.data.after.ref;
@@ -42,15 +90,15 @@ exports.onWithdrawStatusChange = onDocumentUpdated(
       if (after.status === "paid") {
         // ✅ PAID → remove locked coins
         tx.update(userRef, {
-          coinsLocked: Math.max(coinsLocked - amount, 0),
+          coinsLocked: Math.max(coinsLocked - coinsUsed, 0),
         });
       }
 
       if (after.status === "rejected") {
         // ❌ REJECTED → return coins to available
         tx.update(userRef, {
-          coinsAvailable: coinsAvailable + amount,
-          coinsLocked: Math.max(coinsLocked - amount, 0),
+          coinsAvailable: coinsAvailable + coinsUsed,
+          coinsLocked: Math.max(coinsLocked - coinsUsed, 0),
         });
       }
 
@@ -60,6 +108,7 @@ exports.onWithdrawStatusChange = onDocumentUpdated(
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+    const amount = after.requestedAmount || 0;
 
     console.log(
       `Coins settled for ${userId}, status=${after.status}, amount=${amount}`
@@ -151,6 +200,11 @@ exports.claimDailyLogin = onCall(
 
       tx.update(userRef, {
         coinsAvailable: admin.firestore.FieldValue.increment(reward),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(reward),
+
+        // ⭐ WEEKLY BONUS TRACKING
+        "bonus.weeklyEarned": admin.firestore.FieldValue.increment(reward),
+
         "dailyLogin.streak": streak,
         "dailyLogin.lastClaim": now,
       });
@@ -304,26 +358,6 @@ exports.onSpinUsedMission = onDocumentCreated(
   }
 );
 
-exports.onEmailVerifiedMission = onDocumentUpdated(
-  {
-    document: "users/{userId}",
-  },
-  async (event) => {
-    const before = event.data.before.data();
-    const after = event.data.after.data();
-
-    if (!before.emailVerified && after.emailVerified) {
-      const missionRef = event.data.after.ref
-        .collection("missions")
-        .doc("daily");
-
-      await missionRef.set({
-        emailVerified: true,
-      }, { merge: true });
-    }
-  }
-);
-
 exports.checkDailyMissionComplete = onDocumentUpdated(
   {
     document: "users/{userId}/missions/daily",
@@ -333,9 +367,7 @@ exports.checkDailyMissionComplete = onDocumentUpdated(
 
     const complete =
       (data.quizCompleted || 0) >= 10 &&
-      (data.spinUsed || 0) >= 2 &&
-      data.emailVerified === true &&
-      data.profileSaved === true;
+      (data.spinUsed || 0) >= 2;
 
     if (!complete || data.rewardClaimed) return;
 
@@ -358,19 +390,25 @@ exports.checkDailyMissionComplete = onDocumentUpdated(
 
 exports.weeklyMissionReset = onSchedule(
   {
-    schedule: "30 18 * * 6", // Saturday 18:30 UTC = Sunday 00:00 IST
+    schedule: "30 18 * * 6", // Sunday 00:00 IST
     region: "us-central1",
   },
   async () => {
-    const usersSnapshot = await admin.firestore().collection("users").get();
+
+    const usersSnapshot = await admin.firestore()
+      .collection("users")
+      .get();
 
     const batch = admin.firestore().batch();
 
     const currentWeek = getCurrentWeekId();
 
     usersSnapshot.docs.forEach((doc) => {
-      const weeklyRef = doc.ref.collection("missions").doc("weekly");
 
+      const userRef = doc.ref;
+      const weeklyRef = userRef.collection("missions").doc("weekly");
+
+      /// Reset weekly mission progress
       batch.set(
         weeklyRef,
         {
@@ -383,11 +421,24 @@ exports.weeklyMissionReset = onSchedule(
         },
         { merge: true }
       );
+
+      /// ⭐ RESET WEEKLY BONUS TRACKER
+      batch.set(
+        userRef,
+        {
+          bonus: {
+            weeklyEarned: 0
+          }
+        },
+        { merge: true }
+      );
+
     });
 
     await batch.commit();
 
-    console.log("Weekly mission reset completed");
+    console.log("Weekly mission + bonus reset completed");
+
   }
 );
 
@@ -559,5 +610,238 @@ exports.syncTermsVersion = onSchedule(
     } catch (e) {
       console.error("Terms sync error", e);
     }
+  }
+);
+
+exports.claimOneTimeReward = onCall(
+  { region: "us-central1" },
+  async (request) => {
+
+    const uid = request.auth?.uid;
+    const rewardType = request.data.rewardType;
+
+    if (!uid) {
+      throw new Error("Unauthenticated");
+    }
+
+    const userRef = admin.firestore().collection("users").doc(uid);
+
+    return admin.firestore().runTransaction(async (tx) => {
+
+      const snap = await tx.get(userRef);
+
+      if (!snap.exists) {
+        throw new Error("User not found");
+      }
+
+      const user = snap.data();
+
+      let rewardCoins = 0;
+      let fieldName = "";
+
+      if (rewardType === "email") {
+
+        if (!user.emailVerified) {
+          throw new Error("Email not verified");
+        }
+
+        if (user.oneTimeRewards?.emailVerifiedRewardClaimed) {
+          throw new Error("Already claimed");
+        }
+
+        rewardCoins = 100;
+        fieldName = "oneTimeRewards.emailVerifiedRewardClaimed";
+
+      }
+
+      if (rewardType === "profile") {
+
+        if (!user.profileSaved) {
+          throw new Error("Profile not completed");
+        }
+
+        if (user.oneTimeRewards?.profileRewardClaimed) {
+          throw new Error("Already claimed");
+        }
+
+        rewardCoins = 150;
+        fieldName = "oneTimeRewards.profileRewardClaimed";
+
+      }
+
+      tx.update(userRef, {
+        coinsAvailable: admin.firestore.FieldValue.increment(rewardCoins),
+        [fieldName]: true
+      });
+
+      return {
+        success: true,
+        reward: rewardCoins
+      };
+
+    });
+
+  }
+);
+
+exports.cpxPostback = onRequest(
+  { region: "us-central1" },
+  async (req, res) => {
+
+    try {
+
+      const status = req.query.status;
+      const uid = req.query.user_id;
+      const transId = req.query.trans_id;
+      const amountUsd = Number(req.query.amount_usd || 0);
+      const coins = Math.floor(Number(req.query.amount_local || 0));
+
+      if (!uid || !transId) {
+        return res.status(400).send("Missing parameters");
+      }
+
+      /// Only reward completed surveys
+      if (status != 1) {
+        return res.send("Ignored");
+      }
+
+      const db = admin.firestore();
+
+      const userRef = db.collection("users").doc(uid);
+      const txRef = db.collection("cpx_transactions").doc(transId);
+
+      /// Prevent duplicate rewards
+      const txSnap = await txRef.get();
+
+      if (txSnap.exists) {
+        console.log("Duplicate transaction:", transId);
+        return res.send("Duplicate ignored");
+      }
+
+      /// Firestore transaction
+      await db.runTransaction(async (tx) => {
+
+        const userSnap = await tx.get(userRef);
+
+        if (!userSnap.exists) {
+          throw new Error("User not found");
+        }
+
+        /// Update user wallet
+        tx.update(userRef, {
+          coinsAvailable: admin.firestore.FieldValue.increment(coins),
+          totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
+          "earnings.surveyCoins": admin.firestore.FieldValue.increment(coins)
+        });
+
+        /// Save transaction record (FINAL SCHEMA)
+        tx.set(txRef, {
+          uid: uid,
+          transId: transId,
+          coins: coins,
+          amountUsd: amountUsd,
+          source: "cpx",
+          status: "completed",
+          type: "survey",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+      });
+
+      console.log("CPX reward added:", uid, coins);
+
+      return res.status(200).send("OK");
+
+    } catch (e) {
+
+      console.error("CPX error:", e);
+      return res.status(500).send("ERROR");
+
+    }
+
+  }
+);
+
+exports.claimQuizReward = onCall(
+  { region: "us-central1" },
+  async (request) => {
+
+    const uid = request.auth?.uid;
+    const coins = Number(request.data.coins || 0);
+
+    if (!uid) {
+      throw new Error("Unauthenticated");
+    }
+
+    if (coins <= 0 || coins > 50) {
+      throw new Error("Invalid reward");
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection("users").doc(uid);
+
+    return db.runTransaction(async (tx) => {
+
+      const snap = await tx.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+
+      tx.update(userRef, {
+        coinsAvailable: admin.firestore.FieldValue.increment(coins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
+      });
+
+      return { success: true };
+    });
+  }
+);
+
+exports.claimGameReward = onCall(
+  { region: "us-central1" },
+  async (request) => {
+
+    const uid = request.auth?.uid;
+    const coins = Number(request.data.coins || 0);
+    const source = request.data.source || "game";
+
+    if (!uid) throw new Error("Unauthenticated");
+
+    if (coins <= 0 || coins > 100) {
+      throw new Error("Invalid reward");
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection("users").doc(uid);
+
+    return db.runTransaction(async (tx) => {
+
+      const snap = await tx.get(userRef);
+      if (!snap.exists) {
+       throw new Error("User not found");
+      }
+
+      const userData = snap.data();
+
+      const newBalance =
+                (userData.coinsAvailable || 0) + coins;
+
+      tx.update(userRef, {
+        coinsAvailable: admin.firestore.FieldValue.increment(coins),
+        totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
+      });
+
+      /// 🔎 reward log (important for anti-fraud)
+      const txRef = db.collection("wallet_transactions").doc();
+
+      tx.set(txRef, {
+        uid: uid,
+        coins: coins,
+        source: source,
+        balanceAfter: newBalance,
+        type: "reward",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      return { success: true };
+    });
   }
 );

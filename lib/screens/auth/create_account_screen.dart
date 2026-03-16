@@ -4,6 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/app_theme.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'dart:io';
 
 import '../../widgets/bottom_banner_ad.dart';
 import '../../main.dart'; // temporary (for gradient)
@@ -121,6 +124,23 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
 
       final user = userCredential.user!;
 
+      // 📱 DEVICE INFO (SAVE ONLY WHEN ACCOUNT CREATED)
+
+      final deviceInfo = DeviceInfoPlugin();
+
+      String platform = Platform.isAndroid ? "Android" : "iOS";
+      String model = "Unknown";
+
+      if (Platform.isAndroid) {
+        final android = await deviceInfo.androidInfo;
+        model = android.model;
+      } else if (Platform.isIOS) {
+        final ios = await deviceInfo.iosInfo;
+        model = ios.utsname.machine;
+      }
+
+      final packageInfo = await PackageInfo.fromPlatform();
+
       // 2️⃣ SAVE USER DATA IN FIRESTORE
       // 2️⃣ SAVE USER DATA + REFERRAL
       final referralCode = referralController.text.trim().toUpperCase();
@@ -177,6 +197,12 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
         'bonus': {
           'weeklyEarned': 0,
           'weeklyResetAt': FieldValue.serverTimestamp(),
+        },
+
+        'deviceInfo': {
+          'platform': platform,
+          'model': model,
+          'appVersion': packageInfo.version,
         },
 
         /// ⭐ MISSIONS

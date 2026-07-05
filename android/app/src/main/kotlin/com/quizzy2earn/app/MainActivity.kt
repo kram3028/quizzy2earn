@@ -1,4 +1,4 @@
-package com.example.quizzy2earn
+package com.quizzy2earn.app
 
 import io.flutter.embedding.android.FlutterActivity
 

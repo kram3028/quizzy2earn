@@ -1,0 +1,6 @@
+{
+  "name": "Quizzy2Earn",
+  "description": "Answer quizzes and spin the wheel to earn rewards with wallet management and referral progress.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

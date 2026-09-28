@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:flutter_fortune_wheel/flutter_fortune_wheel.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
+import 'package:quizzy2earn/core/app_theme.dart';
 import 'ads/ad_helper.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'widgets/bottom_banner_ad.dart';
@@ -24,7 +26,8 @@ class DailySpinScreen extends StatefulWidget {
 
 class _DailySpinScreenState extends State<DailySpinScreen>
     with TickerProviderStateMixin {
-  final StreamController<int> controller = StreamController<int>();
+  bool _isSpinning = false;
+  late StreamController<int> controller;
 
   RewardedAd? _rewardedAd;
   int freeSpinsUsed = 0;
@@ -41,15 +44,18 @@ class _DailySpinScreenState extends State<DailySpinScreen>
   Timer? _timer;
   late AnimationController _glowController;
   late Animation<double> _glowAnim;
+  final AudioPlayer _spinPlayer = AudioPlayer();
 
   final List<int> rewards = [2, 3, 5, 8, 10, 0];
 
   @override
   void initState() {
     super.initState();
+    controller = StreamController<int>.broadcast();
     checkDailyLimit();
     _loadRewardedAd();
     _loadInterstitialAd();
+    _spinPlayer.setAsset('assets/sounds/spin_wheel.mp3');
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
@@ -62,10 +68,20 @@ class _DailySpinScreenState extends State<DailySpinScreen>
 
   @override
   void dispose() {
-    controller.close();
-    _interstitialAd?.dispose();
+
+    _isSpinning = false;
+
     _timer?.cancel();
+    _interstitialAd?.dispose();
+
+    if (!controller.isClosed) {
+      controller.close();
+    }
+
     _glowController.dispose();
+    _spinPlayer.stop();
+    _spinPlayer.dispose();
+
     super.dispose();
   }
 
@@ -113,59 +129,134 @@ class _DailySpinScreenState extends State<DailySpinScreen>
 
   }
 
-  void _spinWheel({required bool rewarded}) async {
-    final index = Random().nextInt(rewards.length);
-    controller.add(index);
+  Future<void> _spinWheel({required bool rewarded}) async {
 
-    await Future.delayed(const Duration(seconds: 4));
+    if (_isSpinning) return;
 
-    final coins = rewards[index];
+    _isSpinning = true;
 
-    if (rewarded) {
-      await useRewardedSpin();
-    } else {
-      await useFreeSpin();
-    }
+    try {
 
-    Future<void> showResultDialog() async {
-      if (coins > 0) {
-        await _addCoins(coins);
+      final index = Random().nextInt(rewards.length);
 
-        final user = FirebaseAuth.instance.currentUser!;
-        final ref = FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .collection('daily_spin')
-            .doc(todayDocId);
+      debugPrint("Controller closed = ${controller.isClosed}");
+      debugPrint("Selected index = $index");
 
-        await ref.update({
-          'spinCoinsEarned': FieldValue.increment(coins),
-        });
+      await _spinPlayer.seek(Duration.zero);
 
-        spinCoinsToday += coins;
-        totalCoins += coins;
+// START BOTH TOGETHER
+      controller.add(index + rewards.length * 5);
+
+      await _spinPlayer.play();
+
+      await Future.delayed(const Duration(milliseconds: 6000));
+
+      await _spinPlayer.stop();
+
+      final coins = rewards[index];
+
+      /// 🚀 SHOW RESULT IMMEDIATELY
+      Future<void> showResultDialog() async {
+
+        if (!mounted) return;
+
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+            backgroundColor: const Color(0xFF1E1E2C),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(24),
+              side: const BorderSide(
+                color: Color(0x26FFFFFF),
+                width: 1.5,
+              ),
+            ),
+            title: Row(
+              children: [
+                Icon(
+                  coins > 0 ? Icons.emoji_events_rounded : Icons.sentiment_dissatisfied_rounded,
+                  color: coins > 0 ? Colors.amber : Colors.grey,
+                  size: 28,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  coins > 0 ? 'You Won!' : 'Oops!',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                Text(
+                  coins > 0
+                      ? '🎉 You got $coins coins!'
+                      : '😅 Better luck next time!',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xE6FFFFFF),
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => NavigationService.goBack(),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  backgroundColor: Colors.deepPurple,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                ),
+                child: const Text(
+                  'Great!',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+        );
+
+        /// 🔥 SAVE REWARD IN BACKGROUND
+        if (coins > 0) {
+
+          unawaited(_addCoins(coins));
+
+          final user = FirebaseAuth.instance.currentUser!;
+          final ref = FirebaseFirestore.instance
+              .collection('users')
+              .doc(user.uid)
+              .collection('daily_spin')
+              .doc(todayDocId);
+
+          unawaited(
+            ref.update({
+              'spinCoinsEarned': FieldValue.increment(coins),
+            }),
+          );
+
+          spinCoinsToday += coins;
+          totalCoins += coins;
+        }
+
+        setState(() {});
       }
 
-      showDialog(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('You Won!'),
-          content: Text(
-            coins > 0
-                ? '🎉 You got $coins coins!'
-                : '😅 Better luck next time!',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => NavigationService.goBack(),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-
-      setState(() {});
-    }
+      /// 🔥 UPDATE SPIN COUNTER IN BACKGROUND
+      if (rewarded) {
+        unawaited(useRewardedSpin());
+      } else {
+        unawaited(useFreeSpin());
+      }
 
     // 🎯 SHOW INTERSTITIAL ONLY AFTER 2nd FREE SPIN
     if (!rewarded && freeSpinsUsed == 2 && _interstitialAd != null) {
@@ -185,7 +276,10 @@ class _DailySpinScreenState extends State<DailySpinScreen>
 
       _interstitialAd!.show();
     } else {
-      showResultDialog();
+      await showResultDialog();
+    }
+    } finally {
+      _isSpinning = false;
     }
   }
 
@@ -222,7 +316,7 @@ class _DailySpinScreenState extends State<DailySpinScreen>
         );
 
     _rewardedAd!.show(
-      onUserEarnedReward: (_, __) {
+      onUserEarnedReward: (ad, reward) {
         _spinWheel(rewarded: true);
       },
     );
@@ -268,6 +362,8 @@ class _DailySpinScreenState extends State<DailySpinScreen>
 
     totalCoins = userDoc.data()?['coinsAvailable'] ?? 0;
 
+    if (!mounted) return;
+
     setState(() {
       loading = false;
     });
@@ -280,7 +376,7 @@ class _DailySpinScreenState extends State<DailySpinScreen>
   void startMidnightCountdown() {
     _timer?.cancel();
 
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _timer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
       final left = getTimeUntilMidnight();
 
       if (mounted) {
@@ -311,7 +407,11 @@ class _DailySpinScreenState extends State<DailySpinScreen>
     /// 🔥 UPDATE DAILY MISSION
     await updateSpinMission();
 
-    setState(() => freeSpinsUsed++);
+    if (!mounted) return;
+
+    setState(() {
+      freeSpinsUsed++;
+    });
   }
 
   Future<void> useRewardedSpin() async {
@@ -329,7 +429,11 @@ class _DailySpinScreenState extends State<DailySpinScreen>
     /// 🔥 UPDATE DAILY MISSION
     await updateSpinMission();
 
-    setState(() => rewardedSpinsUsed++);
+    if (!mounted) return;
+
+    setState(() {
+      rewardedSpinsUsed++;
+    });
   }
 
   Future<void> updateSpinMission() async {
@@ -350,9 +454,9 @@ class _DailySpinScreenState extends State<DailySpinScreen>
 
   String formatTime(Duration d) {
     String two(int n) => n.toString().padLeft(2, '0');
-    final hours = d.inHours.remainder(24);
-    final minutes = d.inMinutes.remainder(60);
-    final seconds = d.inSeconds.remainder(60);
+    int hours = d.inHours;
+    int minutes = d.inMinutes.remainder(60);
+    int seconds = d.inSeconds.remainder(60);
 
     return "${two(hours)}:${two(minutes)}:${two(seconds)}";
   }
@@ -363,167 +467,375 @@ class _DailySpinScreenState extends State<DailySpinScreen>
     return tomorrow.difference(now);
   }
 
+  Color _getRewardColor(int value) {
+    switch (value) {
+      case 10:
+        return const Color(0xFFFFD700); // Gold star color
+      case 8:
+        return const Color(0xFFFF4081); // Vibrant Pink
+      case 5:
+        return const Color(0xFF00E5FF); // Neon Cyan
+      case 3:
+        return const Color(0xFFE040FB); // Vibrant Purple
+      case 2:
+        return const Color(0xFF651FFF); // Indigo accent
+      default:
+        return const Color(0xFF455A64); // Cool Grey
+    }
+  }
+
+  Widget _buildGlassInfoCard({
+    required String title,
+    required String value,
+    required IconData icon,
+    required Color iconColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0x14FFFFFF),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: const Color(0x26FFFFFF),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0x1A000000),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: iconColor, size: 20),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSpinButton({
+    required String label,
+    required VoidCallback? onPressed,
+    required List<Color> gradientColors,
+    required IconData icon,
+  }) {
+    final bool isDisabled = onPressed == null;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      width: 250,
+      height: 50,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(25),
+        boxShadow: isDisabled
+            ? []
+            : [
+                BoxShadow(
+                  color: gradientColors.last.withValues(alpha: 0.3),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+      ),
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          backgroundColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(25),
+          ),
+        ),
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: isDisabled
+                ? LinearGradient(
+                    colors: const [
+                      Color(0x14FFFFFF),
+                      Color(0x14FFFFFF),
+                    ],
+                  )
+                : LinearGradient(
+                    colors: gradientColors,
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+            borderRadius: BorderRadius.circular(25),
+            border: Border.all(
+              color: isDisabled
+                  ? const Color(0x1AFFFFFF)
+                  : const Color(0x33FFFFFF),
+              width: 1.5,
+            ),
+          ),
+          child: Container(
+            alignment: Alignment.center,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  color: isDisabled ? Colors.white30 : Colors.white,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: isDisabled ? Colors.white30 : Colors.white,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (loading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
+      return Scaffold(
+        body: Container(
+          decoration: BoxDecoration(
+            gradient: appBackgroundGradient,
+          ),
+          child: const Center(
+            child: CircularProgressIndicator(
+              color: Colors.white,
+            ),
+          ),
+        ),
       );
     }
 
     return Scaffold(
+      extendBodyBehindAppBar: true,
       bottomNavigationBar: const BottomBannerAd(),
       appBar: AppBar(
-        title: const Text('Daily Spin'),
+        title: const Text(
+          'Daily Spin',
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.8,
+          ),
+        ),
         centerTitle: true,
-        backgroundColor: Colors.deepPurple,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white),
+          onPressed: () => NavigationService.goBack(),
+        ),
       ),
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: appBackgroundGradient,
+        ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const SizedBox(height: 10),
 
-      // ✅ NEW BODY WITH STACK
-        body: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(bottom: 0),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-
-                    /// TOP CARD
-                    Container(
-                      margin: const EdgeInsets.all(16),
-                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [
-                            Colors.deepPurple.shade400,
-                            Colors.deepPurple.shade700,
-                          ],
+                  // TOP CARD (Info)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildGlassInfoCard(
+                          title: 'Today Spin',
+                          value: '$spinCoinsToday Coins',
+                          icon: Icons.rotate_right_rounded,
+                          iconColor: const Color(0xFFE040FB),
                         ),
-                        borderRadius: BorderRadius.circular(18),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.deepPurple.withOpacity(0.3),
-                            blurRadius: 12,
-                            offset: const Offset(0, 6),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _buildGlassInfoCard(
+                          title: 'Wallet Coins',
+                          value: '$totalCoins Coins',
+                          icon: Icons.monetization_on_rounded,
+                          iconColor: const Color(0xFFFFD700),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // GLOW WHEEL
+                  SizedBox(
+                    height: 330,
+                    child: AnimatedBuilder(
+                      animation: _glowAnim,
+                      builder: (context, _) {
+                        return Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF6A11CB).withValues(alpha: _glowAnim.value * 0.7),
+                                blurRadius: 35,
+                                spreadRadius: 6,
+                              ),
+                            ],
                           ),
-                        ],
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              FortuneWheel(
+                                selected: controller.stream,
+                                animateFirst: false,
+                                physics: CircularPanPhysics(),
+                                duration: const Duration(milliseconds: 6000),
+                                items: rewards.map((e) {
+                                  return FortuneItem(
+                                    child: Text(
+                                      e == 0 ? 'TRY\nAGAIN' : '+$e\nCOINS',
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    style: FortuneItemStyle(
+                                      color: _getRewardColor(e),
+                                      borderColor: const Color(0x66FFFFFF),
+                                      borderWidth: 2,
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                              
+                              // Indicator Pointer at the top
+                              Positioned(
+                                top: -6,
+                                child: Container(
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFFFFB300),
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Color(0x80FFB300),
+                                        blurRadius: 8,
+                                        spreadRadius: 2,
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Icon(
+                                    Icons.arrow_drop_down_sharp,
+                                    size: 40,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+
+                              // Center Hub / Pin
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1E1E2C),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: const Color(0xFFFFB300),
+                                    width: 3,
+                                  ),
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      color: Color(0x4D000000),
+                                      blurRadius: 6,
+                                      offset: Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: const Center(
+                                  child: Icon(
+                                    Icons.star_rounded,
+                                    color: Color(0xFFFFB300),
+                                    size: 22,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // COUNTDOWN (ONLY AFTER FREE SPINS FINISHED)
+                  if (!canUseFreeSpin)
+                    Container(
+                      margin: const EdgeInsets.symmetric(vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0x33000000),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: const Color(0x1AFFFFFF),
+                          width: 1,
+                        ),
                       ),
                       child: Column(
                         children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Today from Spin',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                              Text(
-                                '🟣 $spinCoinsToday Coins',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Total Wallet Coins',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                              Text(
-                                '🟡 $totalCoins Coins',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    /// GLOW WHEEL
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: SizedBox(
-                        height: 340,
-                        child: AnimatedBuilder(
-                          animation: _glowAnim,
-                          builder: (context, _) {
-                            return Container(
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.deepPurple.withOpacity(_glowAnim.value),
-                                    blurRadius: 35,
-                                    spreadRadius: 6,
-                                  ),
-                                ],
-                              ),
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  FortuneWheel(
-                                    selected: controller.stream,
-                                    animateFirst: false,
-                                    items: rewards.map((e) {
-                                      return FortuneItem(
-                                        child: Text(
-                                          e == 0 ? 'TRY\nAGAIN' : '+$e\nCOINS',
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                        style: FortuneItemStyle(
-                                          color: e == 0
-                                              ? Colors.grey.shade700
-                                              : Colors.deepPurple.shade400,
-                                          borderColor: Colors.white,
-                                          borderWidth: 2,
-                                        ),
-                                      );
-                                    }).toList(),
-                                  ),
-                                  const Positioned(
-                                    top: 6,
-                                    child: Icon(
-                                      Icons.arrow_drop_down,
-                                      size: 50,
-                                      color: Colors.orange,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 18),
-
-                    // ⏳ COUNTDOWN (ONLY AFTER FREE SPINS FINISHED)
-                    if (!canUseFreeSpin)
-                      Column(
-                        children: [
                           const Text(
-                            'Come back tomorrow in',
+                            'NEXT SPIN REFILLS IN',
                             style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.grey,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white70,
+                              letterSpacing: 0.8,
                             ),
                           ),
                           const SizedBox(height: 6),
@@ -531,76 +843,57 @@ class _DailySpinScreenState extends State<DailySpinScreen>
                             formatTime(timeLeft),
                             style: const TextStyle(
                               fontSize: 22,
+                              fontFamily: 'monospace',
                               fontWeight: FontWeight.bold,
-                              color: Colors.deepPurple,
+                              color: Color(0xFFFFD700),
+                              letterSpacing: 1.5,
                             ),
                           ),
                         ],
                       ),
-
-                    const SizedBox(height: 24),
-
-                    /// 🎯 FREE SPIN BUTTON
-                    SizedBox(
-                      width: 220,
-                      height: 48,
-                      child: ElevatedButton(
-                        onPressed: canUseFreeSpin
-                            ? () => _spinWheel(rewarded: false)
-                            : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.deepPurple,
-                          disabledBackgroundColor: Colors.grey.shade400,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: Text(
-                          canUseFreeSpin
-                              ? 'Free Spin (${2 - freeSpinsUsed} left)'
-                              : 'Free Spins Finished',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
                     ),
 
-                    const SizedBox(height: 14),
+                  const SizedBox(height: 18),
 
-                    /// 🎥 REWARDED SPIN BUTTON
-                    SizedBox(
-                      width: 220,
-                      height: 48,
-                      child: ElevatedButton(
-                        onPressed: canUseRewardedSpin ? _handleRewardedSpin : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orange,
-                          disabledBackgroundColor: Colors.grey.shade400,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: Text(
-                          canUseRewardedSpin
-                              ? 'Watch Ad Spin (${3 - rewardedSpinsUsed} left)'
-                              : 'Finish Free Spins First',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
+                  // FREE SPIN BUTTON
+                  _buildSpinButton(
+                    label: canUseFreeSpin
+                        ? 'Free Spin (${2 - freeSpinsUsed} left)'
+                        : 'Free Spins Finished',
+                    onPressed: canUseFreeSpin && !_isSpinning
+                        ? () => _spinWheel(rewarded: false)
+                        : null,
+                    gradientColors: const [
+                      Color(0xFF8E24AA),
+                      Color(0xFFE91E63),
+                    ],
+                    icon: Icons.play_arrow_rounded,
+                  ),
 
-                    const SizedBox(height: 40),
-                  ],
-                ),
+                  const SizedBox(height: 12),
+
+                  // REWARDED SPIN BUTTON
+                  _buildSpinButton(
+                    label: canUseRewardedSpin
+                        ? 'Watch Ad Spin (${3 - rewardedSpinsUsed} left)'
+                        : 'Finish Free Spins First',
+                    onPressed: canUseRewardedSpin && !_isSpinning
+                        ? _handleRewardedSpin
+                        : null,
+                    gradientColors: const [
+                      Color(0xFFFFB300),
+                      Color(0xFFFF6F00),
+                    ],
+                    icon: Icons.play_circle_fill_rounded,
+                  ),
+
+                  const SizedBox(height: 30),
+                ],
               ),
             ),
-          ],
+          ),
         ),
+      ),
     );
   }
 }

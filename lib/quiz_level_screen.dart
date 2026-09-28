@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:lottie/lottie.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
-import 'package:quizzy2earn/core/navigation_service.dart';
+import 'package:quizzy2earn/core/app_router.dart';
 import 'ads/ad_helper.dart';
+import 'package:confetti/confetti.dart';
 
 class QuizLevelScreen extends StatefulWidget {
   final int level;
@@ -29,10 +32,12 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   int questionCounterForAd = 0;
   late AnimationController _resultAnimController;
   late Animation<double> _resultFade;
+  late ConfettiController _confettiController;
   int currentIndex = 0;
   bool showResult = false;
   bool lastCorrect = false;
   String correctAnswer = '';
+  final AudioPlayer _audioPlayer = AudioPlayer();
 
   @override
   void initState() {
@@ -43,7 +48,8 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
     // ✅ SAFETY CHECK (VERY IMPORTANT)
     if (startIndex >= widget.questions.length) {
-      levelQuestions = [];
+      // 🔥 NEVER EMPTY (fallback)
+      levelQuestions = widget.questions.take(6).toList();
     } else {
       levelQuestions = widget.questions.sublist(
         startIndex,
@@ -57,10 +63,15 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
     _loadInterstitialAd();
 
+    _audioPlayer.setLoopMode(LoopMode.off);
+
     _resultAnimController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
     );
+
+    _confettiController =
+        ConfettiController(duration: const Duration(seconds: 2));
 
     _resultFade = Tween(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
@@ -73,6 +84,8 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   @override
   void dispose() {
     _resultAnimController.dispose();
+    _confettiController.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -112,56 +125,114 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
   }
 
-  void checkAnswer(String selected) async {
-    final q = levelQuestions[currentIndex];
-    final isCorrect = selected == q['answer'];
+  void checkAnswer(String selected) {
 
-    if (isCorrect) {
-      await addCoin();
+    final q = levelQuestions[currentIndex];
+
+    String clean(String text) {
+      return text
+          .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim()
+          .toLowerCase();
     }
+
+    final selectedClean = clean(selected);
+    final correctClean = clean(q['correctAnswer']);
+
+    final isCorrect = selectedClean == correctClean;
 
     questionCounterForAd++;
 
-    // 👉 If 6th question → show ad FIRST → then result
+    // 👉 Show ad every 6 questions
     if (questionCounterForAd % 6 == 0 && _interstitialAd != null) {
       _interstitialAd!.fullScreenContentCallback =
           FullScreenContentCallback(
             onAdDismissedFullScreenContent: (ad) {
               ad.dispose();
-              _loadInterstitialAd(); // preload next
+              _loadInterstitialAd();
 
-              setState(() {
-                lastCorrect = isCorrect;
-                correctAnswer = q['answer'];
-                showResult = true;
-              });
+              _handleResult(isCorrect, q);
             },
             onAdFailedToShowFullScreenContent: (ad, error) {
               ad.dispose();
               _loadInterstitialAd();
 
-              setState(() {
-                lastCorrect = isCorrect;
-                correctAnswer = q['answer'];
-                showResult = true;
-              });
+              _handleResult(isCorrect, q);
             },
           );
 
       _interstitialAd!.show();
     } else {
-      // 👉 Normal flow (no ad)
-      setState(() {
-        lastCorrect = isCorrect;
-        correctAnswer = q['answer'];
-        showResult = true;
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _resultAnimController.forward(from: 0);
-        }
-      });
+      _handleResult(isCorrect, q);
     }
+    debugPrint("SELECTED: $selected");
+    debugPrint("CORRECT: ${q['correctAnswer']}");
+    debugPrint("RESULT: $isCorrect");
+  }
+
+  String _cleanOption(String text) {
+    return text
+        .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '') // remove hidden chars
+        .replaceAll(RegExp(r'\s+'), ' ') // normalize spaces
+        .trim();
+  }
+
+  void _handleResult(bool isCorrect, Map<String, dynamic> q) async {
+
+    // ✅ GIVE COIN IF CORRECT
+    if (isCorrect) {
+      addCoin();
+
+      // 🔊 PLAY COIN SOUND
+      await _audioPlayer.setAsset('assets/sounds/coin.mp3');
+      await _audioPlayer.play();
+
+      // 🎉 CONFETTI TRIGGER
+      _confettiController.play();
+    }
+
+    setState(() {
+      lastCorrect = isCorrect;
+      correctAnswer = q['correctAnswer'];
+      showResult = true;
+    });
+    _resultAnimController.forward(from: 0); // 🔥 ADD THIS
+  }
+
+  void _showRewardedAd() {
+
+    if (_rewardedAd == null || rewardTaken) return;
+
+    _rewardedAd!.fullScreenContentCallback =
+        FullScreenContentCallback(
+          onAdDismissedFullScreenContent: (ad) {
+            ad.dispose();
+            _loadRewardedAd(); // preload next
+          },
+          onAdFailedToShowFullScreenContent: (ad, error) {
+            ad.dispose();
+            _loadRewardedAd();
+          },
+        );
+
+    _rewardedAd!.show(
+      onUserEarnedReward: (ad, reward) async {
+
+        // ✅ GIVE BONUS COINS
+        await addCoinsToUser(2);
+
+        setState(() {
+          rewardTaken = true;
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('+2 Bonus Coins Added 🎉'),
+          ),
+        );
+      },
+    );
   }
 
   void nextQuestion() async {
@@ -173,7 +244,15 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
       });
     } else {
       await completeLevel();
-      NavigationService.goBack();
+
+      // ✅ SAFE NAVIGATION (NO POP FIRST)
+      if (!mounted) return;
+
+      Navigator.of(context).pushNamedAndRemoveUntil(
+        AppRouter.levels,
+            (route) => route.isFirst,
+        arguments: {'questions': widget.questions},
+      );
     }
   }
 
@@ -183,13 +262,64 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
     FirebaseFirestore.instance.collection('users').doc(user.uid);
 
     await FirebaseFirestore.instance.runTransaction((tx) async {
+      final snapshot = await tx.get(userRef);
+      final data = snapshot.data();
+      if (data == null) return;
+
+      final today = DateTime.now().toString().substring(0, 10);
+
+      /// ✅ TODAY LEVELS
+      List<int> playedToday = [];
+      if (data['playedLevelsToday'] is List) {
+        playedToday = (data['playedLevelsToday'] as List)
+            .map((e) => int.tryParse(e.toString()) ?? 0)
+            .where((e) => e > 0)
+            .toList();
+      }
+
+      /// ✅ PERMANENT LEVELS
+      List<int> playedAll = [];
+      if (data['playedLevels'] is List) {
+        playedAll = (data['playedLevels'] as List)
+            .map((e) => int.tryParse(e.toString()) ?? 0)
+            .where((e) => e > 0)
+            .toList();
+      }
+
+      int maxUnlockedLevel = data['maxUnlockedLevel'] ?? 10;
+
+      /// ✅ CHECK IF NEW LEVEL (🔥 IMPORTANT FIX)
+      final isNewLevel = !playedAll.contains(widget.level);
+
+      /// ✅ ADD LEVEL SAFELY
+      if (!playedToday.contains(widget.level)) {
+        playedToday.add(widget.level);
+      }
+
+      if (isNewLevel) {
+        playedAll.add(widget.level);
+      }
+
+      /// ✅ UPDATE USER (🔥 FIXED QUIZ COUNT)
       tx.update(userRef, {
-        'completedLevels': FieldValue.arrayUnion([widget.level]),
-        'currentLevel': widget.level + 1,
+        'playedLevelsToday': playedToday,
+        'playedLevels': playedAll,
+        'lastPlayedDate': today,
+        'maxUnlockedLevel': maxUnlockedLevel,
+
+        'coinsAvailable': data['coinsAvailable'],
+        'coinsLocked': data['coinsLocked'],
+
+        // 🔥 KEY FIX → NO DUPLICATE COUNT
+        'quizCount': isNewLevel
+            ? FieldValue.increment(1)
+            : data['quizCount'] ?? 0,
       });
     });
 
-    /// 🔥 UPDATE DAILY + WEEKLY QUIZ MISSIONS
+    /// ❌ REMOVED OLD INCREMENT (IMPORTANT)
+    /// DO NOT ADD quizCount.increment here anymore
+
     await updateQuizMission();
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -268,26 +398,52 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
   @override
   Widget build(BuildContext context) {
-    final progress = (currentIndex + 1) / levelQuestions.length;
+    final safeLength = levelQuestions.isEmpty ? 1 : levelQuestions.length;
+    final progress = (currentIndex + 1) / safeLength;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF1E1E2C),
-      appBar: AppBar(
-        title: Text('Level ${widget.level}'),
-        backgroundColor: Colors.deepPurple,
-        centerTitle: true,
-      ),
-      body: levelQuestions.isEmpty
-          ? _buildComingSoonUI()
-          : Center(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: showResult
-              ? FadeTransition(
-            opacity: _resultFade,
-            child: buildResultUI(),
-          )
-              : buildQuestionUI(progress),
+    return PopScope(
+      canPop: false, // 🔥 block system back
+
+      onPopInvokedWithResult: (didPop, result) {
+
+        // ❌ BLOCK EXIT DURING QUIZ
+        if (currentIndex < levelQuestions.length - 1) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("⚠️ Complete all questions to exit"),
+            ),
+          );
+          return;
+        }
+
+        // ✅ ALLOW EXIT AFTER FINISH
+        Navigator.pop(context);
+      },
+
+      child: Scaffold(
+        backgroundColor: const Color(0xFF1E1E2C),
+
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          title: Text('Level ${widget.level}'),
+          backgroundColor: Colors.deepPurple,
+          centerTitle: true,
+        ),
+
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: showResult
+                ? FadeTransition(
+              opacity: _resultFade,
+              child: ScaleTransition(
+                scale: Tween(begin: 0.8, end: 1.0)
+                    .animate(_resultAnimController),
+                child: buildResultUI(),
+              ),
+            )
+                : buildQuestionUI(progress),
+          ),
         ),
       ),
     );
@@ -296,7 +452,14 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   /// ------------------ QUESTION UI ------------------
 
   Widget buildQuestionUI(double progress) {
+    if (levelQuestions.isEmpty) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white,),
+      );
+    }
     final q = levelQuestions[currentIndex];
+
+    final questionNumber = currentIndex + 1;
 
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -325,14 +488,33 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
             borderRadius: BorderRadius.circular(20),
             border: Border.all(color: Colors.white24),
           ),
-          child: Text(
-            q['question'],
-            style: const TextStyle(
-              fontSize: 20,
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-            ),
-            textAlign: TextAlign.center,
+          child: Column( // ✅ FIXED
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+
+              /// 🔥 QUESTION NUMBER
+              Text(
+                'Q$questionNumber',
+                style: const TextStyle(
+                  fontSize: 16,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 10),
+
+              /// QUESTION TEXT
+              Text(
+                q['question'],
+                style: const TextStyle(
+                  fontSize: 20,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         ),
 
@@ -340,6 +522,7 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
 
         /// Options
         ...q['options'].map<Widget>((opt) {
+          debugPrint("OPTION RAW: [$opt]");
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: InkWell(
@@ -365,7 +548,7 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
                   ],
                 ),
                 child: Text(
-                  opt,
+                  _cleanOption(opt),
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: Colors.white,
@@ -384,124 +567,114 @@ class _QuizLevelScreenState extends State<QuizLevelScreen>
   /// ------------------ RESULT UI ------------------
 
   Widget buildResultUI() {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
+    return Stack(
+      alignment: Alignment.center,
       children: [
-        Icon(
-          lastCorrect ? Icons.check_circle : Icons.cancel,
-          size: 100,
-          color: lastCorrect ? Colors.green : Colors.red,
-        ),
-        const SizedBox(height: 20),
-        Text(
-          lastCorrect ? 'Correct Answer!' : 'Wrong Answer!',
-          style: const TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
-        ),
-        const SizedBox(height: 12),
-        if (!lastCorrect)
-          Text(
-            'Correct: $correctAnswer',
-            style: const TextStyle(
-              color: Colors.orange,
-              fontSize: 18,
-            ),
-          ),
+
+        /// 🎉 CONFETTI (FIXED POSITION)
         if (lastCorrect)
-          const Text(
-            '+1 Coin Added 💰',
-            style: TextStyle(
-              color: Colors.greenAccent,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
+          Positioned.fill(
+            child: ConfettiWidget(
+              confettiController: _confettiController,
+              blastDirectionality: BlastDirectionality.explosive,
+              shouldLoop: false,
+              colors: const [
+                Colors.green,
+                Colors.blue,
+                Colors.orange,
+                Colors.purple,
+              ],
             ),
           ),
-        if (_rewardedAd != null && !rewardTaken)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.card_giftcard),
-              label: const Text('Watch Ad & Get +2 Bonus Coins'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
+
+        /// MAIN CONTENT CENTERED
+        Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+
+              /// ICON
+              if (lastCorrect)
+                SizedBox(
+                  height: 150,
+                  child: Lottie.asset(
+                    'assets/animations/coin.json',
+                    repeat: false,
+                  ),
+                )
+              else
+                Icon(
+                  Icons.cancel,
+                  size: 110,
+                  color: Colors.redAccent,
+                ),
+
+              const SizedBox(height: 20),
+
+              /// TITLE
+              Text(
+                lastCorrect ? 'Correct!' : 'Wrong!',
+                style: const TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
                 ),
               ),
-              onPressed: (_rewardedAd == null || rewardTaken)
-                  ? null
-                  : () {
-                _rewardedAd!.fullScreenContentCallback =
-                    FullScreenContentCallback(
-                      onAdDismissedFullScreenContent: (ad) {
-                        ad.dispose();
-                        _loadRewardedAd(); // preload next
-                      },
-                    );
 
-                _rewardedAd!.show(
-                  onUserEarnedReward: (ad, reward) async {
-                    // ✅ ONLY HERE GIVE COINS
-                    await addCoinsToUser(2);
+              const SizedBox(height: 10),
 
-                    setState(() {
-                      rewardTaken = true;
-                    });
+              /// RESULT TEXT
+              if (lastCorrect)
+                const Text(
+                  '+1 Coin Added 💰',
+                  style: TextStyle(
+                    color: Colors.greenAccent,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
 
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('+2 Bonus Coins Added 🎉'),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
+              if (!lastCorrect)
+                Text(
+                  'Correct: $correctAnswer',
+                  style: const TextStyle(
+                    color: Colors.orangeAccent,
+                    fontSize: 18,
+                  ),
+                ),
+
+              const SizedBox(height: 30),
+
+              /// 🎁 REWARD BUTTON
+              if (_rewardedAd != null && !rewardTaken)
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.ondemand_video),
+                  label: const Text('Watch Ad & Get +2 Coins'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                    padding: const EdgeInsets.symmetric(
+                        vertical: 16, horizontal: 24),
+                  ),
+                  onPressed: _showRewardedAd,
+                ),
+
+              const SizedBox(height: 20),
+
+              /// NEXT BUTTON
+              ElevatedButton(
+                onPressed: nextQuestion,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.deepPurple,
+                  padding: const EdgeInsets.symmetric(
+                      vertical: 14, horizontal: 40),
+                ),
+                child: const Text('Next'),
+              ),
+            ],
           ),
-        const SizedBox(height: 30),
-        ElevatedButton(
-          onPressed: nextQuestion,
-          child: const Text('Next'),
-        )
+        ),
       ],
-    );
-  }
-
-  Widget _buildComingSoonUI() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: const [
-          Icon(
-            Icons.lock_clock,
-            size: 100,
-            color: Colors.grey,
-          ),
-          SizedBox(height: 20),
-          Text(
-            'Level Coming Soon 🚀',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-          SizedBox(height: 10),
-          Text(
-            'Come back tomorrow for new questions!',
-            style: TextStyle(
-              fontSize: 16,
-              color: Colors.white70,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 }

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import '../../ads/ad_helper.dart';
@@ -21,8 +20,6 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
   bool canClaimToday = false;
   Duration nextClaimTime = Duration.zero;
 
-  String referralCode = '';
-  int referralCount = 0;
   RewardedAd? _rewardedAd;
   bool rewardedAdReady = false;
 
@@ -55,7 +52,6 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
     if (data == null) return;
 
     final daily = data['dailyLogin'] ?? {};
-    final referral = data['referral'] ?? {};
     final bonus = data['bonus'] ?? {};
     emailVerified = data['emailVerified'] ?? false;
     profileSaved = data['profileSaved'] ?? false;
@@ -67,8 +63,6 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
 
     currentStreak = daily['streak'] ?? 0;
     weeklyEarned = bonus['weeklyEarned'] ?? 0;
-    referralCode = referral['code'] ?? '';
-    referralCount = referral['totalReferrals'] ?? 0;
 
     final lastClaim = daily['lastClaim'] as Timestamp?;
 
@@ -178,56 +172,8 @@ class _BonusCenterScreenState extends State<BonusCenterScreen> {
 
   }
 
-  /// 🔥 GENERATE REFERRAL CODE
-  Future<void> generateReferralIfNeeded() async {
-    if (user == null || referralCode.isNotEmpty) return;
-
-    final code = user!.uid.substring(0, 6).toUpperCase();
-
-    await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user!.uid)
-        .set({
-      'referral': {
-        'code': code,
-        'totalReferrals': 0,
-      }
-    }, SetOptions(merge: true));
-
-    referralCode = code;
-    setState(() {});
-  }
-
-  Future<void> shareReferral() async {
-    if (referralCode.isEmpty) return;
-
-    final message = '''
-🎯 Join Quizzy2Earn and start earning real rewards!
-
-Use my referral code: $referralCode
-
-Download now:
-https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
-''';
-
-    await Share.share(message);
-  }
-
-  Future<void> copyReferralCode() async {
-    if (referralCode.isEmpty) return;
-
-    await Clipboard.setData(ClipboardData(text: referralCode));
-
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Referral code copied')),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    generateReferralIfNeeded();
 
     return Scaffold(
       extendBodyBehindAppBar: true, // 🔥 full gradient behind status bar
@@ -244,9 +190,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
                 const SizedBox(height: 16),
 
                 _dailyLoginCard(),
-                const SizedBox(height: 16),
-
-                _referralCard(),
                 const SizedBox(height: 16),
 
                 _missionCard(),
@@ -276,7 +219,7 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
           return const Card(
             child: Padding(
               padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
+              child: Center(child: CircularProgressIndicator(color: Colors.white,)),
             ),
           );
         }
@@ -409,87 +352,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
     );
   }
 
-  /// ⭐ REFERRAL UI
-  Widget _referralCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white24),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.group, color: Colors.white),
-              SizedBox(width: 8),
-              Text(
-                "Invite & Earn",
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            "Invite friends and earn rewards when they complete missions.",
-            style: TextStyle(color: Colors.white70),
-          ),
-          const SizedBox(height: 14),
-
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    referralCode,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.copy, color: Colors.white),
-                  onPressed: copyReferralCode,
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 12),
-
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.share),
-              label: const Text("Invite Friends"),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
-              onPressed: shareReferral,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   /// ⭐ MISSIONS (REAL-TIME)
   Widget _missionCard() {
     if (user == null) return const SizedBox();
@@ -506,7 +368,7 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
           return const Card(
             child: Padding(
               padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
+              child: Center(child: CircularProgressIndicator(color: Colors.white,)),
             ),
           );
         }
@@ -515,7 +377,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
 
         final quiz = data['quizCompleted'] ?? 0;
         final spin = data['spinUsed'] ?? 0;
-        final appOpened = data['appOpened'] ?? false;
 
         return Card(
           color: Colors.transparent,
@@ -544,11 +405,6 @@ https://play.google.com/store/apps/details?id=com.yourapp.quizzy2earn
                 _missionItem(
                   "Use 2 daily spins ($spin / 2)",
                   spin >= 2,
-                ),
-
-                _missionItem(
-                  "Open app 3 consecutive days",
-                  appOpened,
                 ),
               ],
             ),

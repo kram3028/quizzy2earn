@@ -24,9 +24,9 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
   final phoneController = TextEditingController(); // ✅ STEP 1
-  final referralController = TextEditingController();
   bool _acceptedTerms = false;
   bool _openingTerms = false;
+  bool _acceptedPrivacy = false;
 
   bool _obscurePassword = true;
   bool _isLoading = false;
@@ -57,13 +57,21 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
 
     final doc = await FirebaseFirestore.instance
         .collection('app_config')
-        .doc('terms')
+        .doc('privacy')
         .get();
 
-    final version = doc.data()?['currentVersion'] ?? "1.0";
+    final version = (doc.data()?['currentVersion'] ?? "").toString();
+
+    if (version.isEmpty) {
+      setState(() => _openingTerms = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Failed to load Terms. Try again")),
+      );
+      return;
+    }
 
     final agreed = await NavigationService.pushNamed(
-      AppRouter.terms,
+      AppRouter.privacy,
       args: {
         'forceAgree': false,
         'currentTermsVersion': version,
@@ -73,12 +81,23 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
     if (!mounted) return;
 
     setState(() {
-      _acceptedTerms = agreed == true;
+      _acceptedPrivacy = agreed == true;
       _openingTerms = false;
     });
   }
 
-  // 🔥 STEP 3: CONNECT FIREBASE AUTH + FIRESTORE
+  Future<void> _openTermsSimple() async {
+    final agreed = await NavigationService.pushNamed(
+      AppRouter.termsView,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _acceptedTerms = agreed == true;
+    });
+  }
+
   Future<void> _createAccount() async {
 
     // 🟢 PHONE VALIDATION
@@ -95,9 +114,14 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
 
     if (!_acceptedTerms) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('You must accept Terms & Conditions'),
-        ),
+        const SnackBar(content: Text('Please accept Terms & Conditions')),
+      );
+      return;
+    }
+
+    if (!_acceptedPrivacy) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please accept Privacy Policy')),
       );
       return;
     }
@@ -105,9 +129,9 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
     if (nameController.text.trim().isEmpty ||
         emailController.text.trim().isEmpty ||
         phoneController.text.trim().isEmpty ||
-        passwordController.text.trim().length < 6) {
+        passwordController.text.trim().length < 8) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Fill all fields (min 6 char password)')),
+        const SnackBar(content: Text('Fill all fields (min 8 char password)')),
       );
       return;
     }
@@ -141,31 +165,20 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
 
       final packageInfo = await PackageInfo.fromPlatform();
 
-      // 2️⃣ SAVE USER DATA IN FIRESTORE
-      // 2️⃣ SAVE USER DATA + REFERRAL
-      final referralCode = referralController.text.trim().toUpperCase();
+      final userCode = user.uid.substring(0, 8).toUpperCase();
 
-      String? referredByUserId;
+      final termsDoc = await FirebaseFirestore.instance
+          .collection('app_config')
+          .doc('privacy')
+          .get();
 
-      if (referralCode.isNotEmpty) {
-        final query = await FirebaseFirestore.instance
-            .collection('users')
-            .where('referral.code', isEqualTo: referralCode)
-            .limit(1)
-            .get();
-
-        if (query.docs.isNotEmpty) {
-          referredByUserId = query.docs.first.id;
-        }
-      }
-
-      final userCode = user.uid.substring(0, 6).toUpperCase();
+      final currentVersion = termsDoc.data()?['currentVersion'] ?? "1.0.0";
 
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
         'name': nameController.text.trim(),
         'email': user.email,
         'phone': '+91${phoneController.text.trim()}',
-        'coinsAvailable': referredByUserId != null ? 50 : 0,
+        'coinsAvailable': 0,
         'coinsLocked': 0,
         'createdAt': FieldValue.serverTimestamp(),
         'lastLogin': FieldValue.serverTimestamp(),
@@ -174,8 +187,12 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
         'emailEditable': true,
         'emailVerifiedAt': null,
 
+        'agreedToPrivacy': true,
+        'agreedPrivacyVersion': currentVersion,
+        'privacyAgreedAt': FieldValue.serverTimestamp(),
+
         'agreedToTerms': true,
-        'agreedTermsVersion': "1.0",
+        'agreedTermsVersion': currentVersion,
         'termsAgreedAt': FieldValue.serverTimestamp(),
 
         /// ⭐ DAILY LOGIN
@@ -185,12 +202,9 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
           'lastMissed': null,
         },
 
-        /// ⭐ REFERRAL
-        'referral': {
-          'code': userCode,
-          'referredBy': referredByUserId,
-          'totalReferrals': 0,
-          'milestoneRewarded': false,
+        'earnings': {
+          'referralCoins': 0,
+          'surveyCoins': 0,
         },
 
         /// ⭐ BONUS
@@ -204,34 +218,25 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
           'model': model,
           'appVersion': packageInfo.version,
         },
-
-        /// ⭐ MISSIONS
-        'missions': {
-          'quiz10': false,
-          'spin2': false,
-          'profileVerified': false,
-          'open3days': false,
-          'lastReset': FieldValue.serverTimestamp(),
-        },
       });
 
-      /// Give referral reward to inviter
-      if (referredByUserId != null) {
-        final referrerRef = FirebaseFirestore.instance
-            .collection('users')
-            .doc(referredByUserId);
+      final db = FirebaseFirestore.instance;
 
-        await FirebaseFirestore.instance.runTransaction((tx) async {
-          final snap = await tx.get(referrerRef);
+      // ✅ Create referral subcollection
+      await db
+          .collection('users')
+          .doc(user.uid)
+          .collection('referral')
+          .doc('main')
+          .set({
+        'code': userCode,
+      }, SetOptions(merge: true));
 
-          if (snap.exists) {
-            tx.update(referrerRef, {
-              'coinsAvailable': FieldValue.increment(50),
-              'referral.totalReferrals': FieldValue.increment(1),
-            });
-          }
-        });
-      }
+      // ✅ Create global referral code
+      await db.collection('referral_codes').doc(userCode).set({
+        'uid': user.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
 
       // 3️⃣ NAVIGATE TO HOME
       if (mounted) {
@@ -343,20 +348,6 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                       ),
                     ),
 
-                    // Referral Code
-                    glassInput(
-                      child: TextField(
-                        controller: referralController,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: const InputDecoration(
-                          hintText: 'Referral Code (Optional)',
-                          hintStyle: TextStyle(color: Colors.white70),
-                          prefixIcon: Icon(Icons.card_giftcard, color: Colors.white),
-                          border: InputBorder.none,
-                        ),
-                      ),
-                    ),
-
                     // 🔒 PASSWORD
                     glassInput(
                       child: TextField(
@@ -386,15 +377,14 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                       ),
                     ),
 
+                    // ✅ TERMS
                     Row(
                       children: [
                         Checkbox(
                           value: _acceptedTerms,
-                          onChanged: _openingTerms
-                              ? null
-                              : (v) {
+                          onChanged: (v) {
                             if (v == true) {
-                              _openTerms();
+                              _openTermsSimple();
                             } else {
                               setState(() => _acceptedTerms = false);
                             }
@@ -403,27 +393,43 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                         ),
                         Expanded(
                           child: GestureDetector(
+                            onTap: _openTermsSimple,
+                            child: const Text(
+                              'I agree to the Terms & Conditions',
+                              style: TextStyle(
+                                color: Colors.white,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    // ✅ PRIVACY
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _acceptedPrivacy,
+                          onChanged: _openingTerms
+                              ? null
+                              : (v) {
+                            if (v == true) {
+                              _openTerms(); // privacy
+                            } else {
+                              setState(() => _acceptedPrivacy = false);
+                            }
+                          },
+                          activeColor: Colors.deepPurple,
+                        ),
+                        Expanded(
+                          child: GestureDetector(
                             onTap: _openingTerms ? null : _openTerms,
-                            child: _openingTerms
-                                ? const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                                : RichText(
-                              text: const TextSpan(
-                                style: TextStyle(color: Colors.white70, fontSize: 13),
-                                children: [
-                                  TextSpan(text: 'I agree to the '),
-                                  TextSpan(
-                                    text: 'Terms & Privacy Policy',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      decoration: TextDecoration.underline,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
+                            child: const Text(
+                              'I agree to the Privacy Policy',
+                              style: TextStyle(
+                                color: Colors.white,
+                                decoration: TextDecoration.underline,
                               ),
                             ),
                           ),
@@ -437,7 +443,7 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
-                        onPressed: (_isLoading || !_acceptedTerms) ? null : _createAccount,
+                        onPressed: (_isLoading || !_acceptedTerms || !_acceptedPrivacy) ? null : _createAccount,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: Colors.deepPurple,
@@ -453,12 +459,12 @@ class _CreateAccountScreenState extends State<CreateAccountScreen>
                           width: 22,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Colors.deepPurple,
+                            color: Colors.white,
                           ),
                         )
                             : const Text(
                           'Create Account',
-                          style: TextStyle(fontWeight: FontWeight.bold),
+                          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.black),
                         ),
                       ),
                     ),

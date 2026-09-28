@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:quizzy2earn/screens/terms/terms_conditions_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import '../../widgets/bottom_banner_ad.dart';
 import 'package:quizzy2earn/core/app_theme.dart';
@@ -45,6 +45,7 @@ class _RedeemScreenState extends State<RedeemScreen> {
   String selectedPayoutCategory = 'UPI'; // UPI | GiftCard
   String selectedUpiMethod = 'GPay';
   String selectedGiftCard = 'Amazon';
+  bool agreedToPrivacy = false;
   bool agreedToTerms = false;
 
   @override
@@ -68,7 +69,7 @@ class _RedeemScreenState extends State<RedeemScreen> {
 
       Future.microtask(() {
         NavigationService.pushNamed(
-          AppRouter.terms,
+          AppRouter.privacy,
           args: {
             'forceAgree': false,
             'currentTermsVersion': widget.currentTermsVersion,
@@ -105,6 +106,23 @@ class _RedeemScreenState extends State<RedeemScreen> {
 
     });
 
+  }
+
+  Future<void> saveTermsAgreement() async {
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) return;
+
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .update({
+      'agreedToPrivacy': true,
+      'agreedToTerms': true,
+
+      'agreedPrivacyVersion': widget.currentTermsVersion,
+      'agreedTermsVersion': widget.currentTermsVersion,
+    });
   }
 
   @override
@@ -363,31 +381,88 @@ class _RedeemScreenState extends State<RedeemScreen> {
 
                 const SizedBox(height: 6),
 
-                // Terms
+                // ✅ TERMS
                 Row(
                   children: [
                     Checkbox(
                       value: agreedToTerms,
                       activeColor: Colors.white,
                       checkColor: Colors.deepPurple,
-                      onChanged: (v) =>
-                          setState(() => agreedToTerms = v!),
+                      onChanged: (v) async {
+                        if (v == true) {
+                          final result = await NavigationService.pushNamed(AppRouter.termsView);
+
+                          setState(() {
+                            agreedToTerms = result == true;
+                          });
+                        } else {
+                          setState(() => agreedToTerms = false);
+                        }
+                      },
                     ),
                     Expanded(
                       child: GestureDetector(
-                        onTap: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => TermsConditionsScreen(
-                                currentTermsVersion:
-                                widget.currentTermsVersion,
-                              ),
-                            ),
-                          );
+                        onTap: () async {
+                          final result = await NavigationService.pushNamed(AppRouter.termsView);
+
+                          setState(() {
+                            agreedToTerms = result == true;
+                          });
                         },
                         child: const Text(
                           'I agree to Terms & Conditions',
+                          style: TextStyle(
+                            color: Colors.white,
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+                // ✅ PRIVACY
+                Row(
+                  children: [
+                    Checkbox(
+                      value: agreedToPrivacy,
+                      activeColor: Colors.white,
+                      checkColor: Colors.deepPurple,
+                      onChanged: (v) async {
+                        if (v == true) {
+                          final result = await NavigationService.pushNamed(
+                            AppRouter.privacy,
+                            args: {
+                              'forceAgree': false,
+                              'currentTermsVersion': widget.currentTermsVersion,
+                            },
+                          );
+
+                          setState(() {
+                            agreedToPrivacy = result == true;
+                          });
+                        } else {
+                          setState(() => agreedToPrivacy = false);
+                        }
+                      },
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () async {
+                          final result = await NavigationService.pushNamed(
+                            AppRouter.privacy,
+                            args: {
+                              'forceAgree': false,
+                              'currentTermsVersion': widget.currentTermsVersion,
+                            },
+                          );
+
+                          setState(() {
+                            agreedToPrivacy = result == true;
+                          });
+                        },
+                        child: const Text(
+                          'I agree to Privacy Policy',
                           style: TextStyle(
                             color: Colors.white,
                             decoration: TextDecoration.underline,
@@ -405,7 +480,8 @@ class _RedeemScreenState extends State<RedeemScreen> {
                   width: double.infinity,
                   child: ElevatedButton(
                     onPressed: widget.hasPendingWithdraw ||
-                        !agreedToTerms ||
+                            !agreedToPrivacy ||
+                            !agreedToTerms ||
                         !isAmountValid
                         ? null
                         : () {
@@ -447,6 +523,8 @@ class _RedeemScreenState extends State<RedeemScreen> {
                         }
 
                         NavigationService.goBack();
+
+                        await saveTermsAgreement();
 
                         widget.onWithdraw(
                           enteredAmount,

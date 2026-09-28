@@ -3,13 +3,13 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:google_sign_in/google_sign_in.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'widgets/bottom_banner_ad.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
 import '../../screens/auth/auth_gate.dart';
 import 'dart:async';
+import 'ads/unity_ads_helper.dart';
 
 // 🔹 Glass input wrapper
 Widget glassInput({required Widget child}) {
@@ -55,26 +55,9 @@ void main() async {
 
   await MobileAds.instance.initialize(); // 👈 ADD THIS
 
+  await UnityAdsHelper.initialize();
+
   runApp(const Quizzy2EarnApp());
-}
-
-Future<UserCredential> signInWithGoogle() async {
-  final GoogleSignInAccount? googleUser =
-  await GoogleSignIn().signIn();
-
-  if (googleUser == null) {
-    throw Exception('Google sign-in aborted');
-  }
-
-  final GoogleSignInAuthentication googleAuth =
-  await googleUser.authentication;
-
-  final credential = GoogleAuthProvider.credential(
-    accessToken: googleAuth.accessToken,
-    idToken: googleAuth.idToken,
-  );
-
-  return await FirebaseAuth.instance.signInWithCredential(credential);
 }
 
 Future<bool> checkUserProfileExists() async {

@@ -15,7 +15,9 @@ import '../screens/support/support_screen.dart';
 class AppRouter {
   static const String welcome = '/welcome';
   static const String home = '/home';
+  static const String privacy = '/privacy';
   static const String terms = '/terms';
+  static const String termsView = '/termsView';
   static const String login = '/login';
   static const String createAccount = '/createAccount';
   static const String levels = '/levels';
@@ -49,7 +51,7 @@ class AppRouter {
         final args = settings.arguments as Map?;
         return MaterialPageRoute(
           builder: (_) => LevelsScreen(
-            questions: args?['questions'] ?? [],
+            questions: (args?['questions'] as List?)?.cast<Map<String, dynamic>>() ?? [],
           ),
         );
 
@@ -81,18 +83,28 @@ class AppRouter {
           builder: (_) => RedeemScreen(
             coins: args?['coins'] ?? 0,
             hasPendingWithdraw: args?['hasPendingWithdraw'] ?? false,
-            currentTermsVersion: args?['currentTermsVersion'] ?? "1.0",
+            currentTermsVersion: args?['currentTermsVersion'] ?? "1.0.0",
             onShowAdThen: args?['onShowAdThen'],
             onWithdraw: args?['onWithdraw'],
           ),
         );
 
-      case terms:
+      case AppRouter.privacy:
         final args = settings.arguments as Map?;
         return MaterialPageRoute(
           builder: (_) => TermsConditionsScreen(
+            type: "privacy", // ✅ ADD
             forceAgree: args?['forceAgree'] ?? false,
-            currentTermsVersion: args?['currentTermsVersion'] ?? "1.0",
+            currentTermsVersion: args?['currentTermsVersion'] ?? "1.0.0",
+          ),
+        );
+
+      case AppRouter.termsView:
+        return MaterialPageRoute(
+          builder: (_) => const TermsConditionsScreen(
+            type: "terms", // ✅ ADD
+            forceAgree: false,
+            currentTermsVersion: "1.0.0",
           ),
         );
 

@@ -13,7 +13,7 @@ class FAQScreen extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         children: const [
           FAQItem(
-            question: "How do I withdraw my earnings?",
+            question: "How do I withdraw my Coins?",
             answer:
             "Go to the Wallet section, enter your payment details, and submit a withdrawal request. It will be reviewed and processed monthly.",
           ),

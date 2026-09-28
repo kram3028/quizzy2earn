@@ -10,7 +10,9 @@ import 'package:confetti/confetti.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:quizzy2earn/core/app_router.dart';
 import 'package:quizzy2earn/core/navigation_service.dart';
+import 'package:quizzy2earn/screens/referral/invite_earn_screen.dart';
 import '../bonus/bonus_center_screen.dart';
+import 'package:quizzy2earn/config/app_config.dart';
 
 import '../../ads/ad_helper.dart';
 import '../../widgets/bottom_banner_ad.dart';
@@ -37,9 +39,14 @@ class _HomeScreenState extends State<HomeScreen>
   int invalidQuestionCount = 0;
   int coinsAvailable = 0;
   int coinsLocked = 0;
+  String? userName;
+  int activeDays = 0;
+  int streak = 0;
+  Map<String, dynamic>? dailyMissionData;
   int selectedTabIndex = 0;
   StreamSubscription<DocumentSnapshot>? userSubscription;
   StreamSubscription<QuerySnapshot>? withdrawSubscription;
+  StreamSubscription<DocumentSnapshot>? dailyMissionSubscription;
   Map<String, dynamic>? latestWithdrawRequest;
   bool get hasPendingWithdraw =>
       latestWithdrawRequest != null &&
@@ -52,6 +59,8 @@ class _HomeScreenState extends State<HomeScreen>
   int quizCounterForInterstitial = 0;
   int quizStartCount = 0;
   int questionAdCounter = 0;
+  int adWatchCount = 0;
+  DateTime? lastAdTime;
 
   final String sheetUrl =
       'https://script.google.com/macros/s/AKfycbx2INUKrRWYjmyGCQBjP180T_RLZcLwKfn_vA1NLMGmEV52-5B3udzdSI4NEPcY9l58/exec';
@@ -64,9 +73,14 @@ class _HomeScreenState extends State<HomeScreen>
 
     loadQuestionsFromSheet(); // ❓ Load quiz questions
 
+    FraudDetectionService.enforceBlockIfNeeded();
+    FraudDetectionService.updateFraudScore();
+
     startUserRealtimeListener();
 
     startWithdrawRealtimeListener();
+
+    startDailyMissionRealtimeListener(); // 👈 Listen to daily missions
 
     saveFcmToken();
 
@@ -100,9 +114,15 @@ class _HomeScreenState extends State<HomeScreen>
     final res = await http.get(Uri.parse("https://api64.ipify.org?format=json"));
     final ip = jsonDecode(res.body)['ip'];
 
-    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-      'lastIp': ip,
-    }, SetOptions(merge: true));
+    final userRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid);
+
+    try {
+      await userRef.update({'lastIp': ip});
+    } catch (e) {
+      await userRef.set({'lastIp': ip}, SetOptions(merge: true));
+    }
   }
 
   void _loadRewardedInterstitialAd() {
@@ -155,6 +175,22 @@ class _HomeScreenState extends State<HomeScreen>
 
     /// 🔥 If first time OR new day → reset mission
     if (!snap.exists || snap['date'] != today) {
+
+      // 🔥 TRACK ACTIVE DAY (ONLY ONCE PER DAY)
+      final userRef = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid);
+
+      try {
+        await userRef.update({
+          'activeDays': FieldValue.increment(1),
+        });
+      } catch (e) {
+        await userRef.set({
+          'activeDays': 1,
+        }, SetOptions(merge: true));
+      }
+
       await dailyRef.set({
         'date': today,
         'quizCompleted': 0,
@@ -168,18 +204,40 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _showRewardedInterstitialThen(VoidCallback onContinue) {
+    final now = DateTime.now();
+
+    // ❌ Too many ads in short time
+    if (lastAdTime != null &&
+        now.difference(lastAdTime!).inSeconds < 10) {
+      debugPrint("🚫 Ad blocked (too frequent)");
+      onContinue();
+      return;
+    }
+
+    // ❌ Daily limit (app: 50 ads)
+    if (adWatchCount >= 50) {
+      debugPrint("🚫 Ad limit reached");
+      onContinue();
+      return;
+    }
+
+    // ✅ Update counters
+    adWatchCount++;
+    lastAdTime = now;
+
+    // 👇 EXISTING CODE STARTS HERE
     if (_rewardedInterstitialAd != null) {
       _rewardedInterstitialAd!.fullScreenContentCallback =
           FullScreenContentCallback(
             onAdDismissedFullScreenContent: (ad) {
               ad.dispose();
               _loadRewardedInterstitialAd();
-              onContinue(); // 👉 continue original action
+              onContinue();
             },
             onAdFailedToShowFullScreenContent: (ad, error) {
               ad.dispose();
               _loadRewardedInterstitialAd();
-              onContinue(); // 👉 still continue
+              onContinue();
             },
           );
 
@@ -189,7 +247,6 @@ class _HomeScreenState extends State<HomeScreen>
         },
       );
     } else {
-      // If ad not ready → continue normally
       onContinue();
     }
   }
@@ -197,44 +254,106 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> loadQuestionsFromSheet() async {
     final response = await http.get(Uri.parse(sheetUrl));
 
-    if (response.statusCode == 200) {
-      final List<dynamic> jsonList = jsonDecode(response.body);
+    if (response.statusCode != 200) return;
 
-      final List<Map<String, dynamic>> loadedQuestions = [];
+    final List<dynamic> jsonList = jsonDecode(response.body);
 
-      invalidQuestionCount = 0;
+    final today = DateTime.now().toString().substring(0, 10);
 
-      for (final item in jsonList) {
-        if (!isValidQuestion(item)) {
-          invalidQuestionCount++;
-          continue; // skip bad row
-        }
+    List<Map<String, dynamic>> todayQuestions = [];
+    List<Map<String, dynamic>> oldQuestions = [];
 
-        loadedQuestions.add({
-          'question': item['question'].toString().trim(),
-          'options': [
-            item['option1'].toString().trim(),
-            item['option2'].toString().trim(),
-            item['option3'].toString().trim(),
-            item['option4'].toString().trim(),
-          ],
-          'answer': item['answer'].toString().trim(),
-          'reference': item['reference']?.toString().trim() ?? '',
-        });
+    for (final item in jsonList) {
+      if (!isValidQuestion(item)) continue;
+
+      // 🔥 SAFE CLEAN FUNCTION
+      String clean(dynamic text) {
+        return (text ?? '')
+            .toString()
+            .replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
       }
-      if (!mounted) return;
 
-      setState(() {
-        questions = loadedQuestions;
-        dataValidationFailed = invalidQuestionCount > 0;
-      });
+      final q = {
+        'id': clean(item['id']),
+        'question': clean(item['question']),
+
+        // ✅ FIXED: USE ARRAY INSTEAD OF option1,2,3,4
+        'options': [
+          clean(item['option1']),
+          clean(item['option2']),
+          clean(item['option3']),
+          clean(item['option4']),
+        ],
+
+        // ✅ FIXED KEY NAME (VERY IMPORTANT)
+        'correctAnswer': clean(item['answer']),
+
+        'reference': clean(item['reference']),
+        'difficulty': clean(item['difficulty'] ?? 'medium'),
+        'date': clean(item['date']),
+      };
+
+      if (q['date'] == today) {
+        todayQuestions.add(q);
+      } else {
+        oldQuestions.add(q);
+      }
     }
+
+    List<Map<String, dynamic>> finalQuestions = [];
+
+    // 🔥 LOAD ALL QUESTIONS
+    finalQuestions = [...todayQuestions, ...oldQuestions];
+
+    // 🔀 Shuffle
+    finalQuestions.shuffle();
+
+    /// 🎯 BALANCE DIFFICULTY
+    finalQuestions = balanceQuestions(finalQuestions);
+
+    if (!mounted) return;
+
+    setState(() {
+      questions = finalQuestions;
+    });
+  }
+
+  List<Map<String, dynamic>> balanceQuestions(List<Map<String, dynamic>> questions) {
+    List<Map<String, dynamic>> easy = [];
+    List<Map<String, dynamic>> medium = [];
+    List<Map<String, dynamic>> hard = [];
+
+    for (var q in questions) {
+      switch (q['difficulty']) {
+        case 'easy':
+          easy.add(q);
+          break;
+        case 'hard':
+          hard.add(q);
+          break;
+        default:
+          medium.add(q);
+      }
+    }
+
+    easy.shuffle();
+    medium.shuffle();
+    hard.shuffle();
+
+    return [
+      ...easy.take(20),
+      ...medium.take(50),
+      ...hard.take(30),
+    ];
   }
 
   @override
   void dispose() {
     userSubscription?.cancel();
     withdrawSubscription?.cancel();
+    dailyMissionSubscription?.cancel();
 
     _confettiController.dispose();
     _homeAnimController.dispose();
@@ -258,12 +377,40 @@ class _HomeScreenState extends State<HomeScreen>
       final data = doc.data();
       if (data == null) return;
 
+      if (!mounted) return;
+
+      final daily = data['dailyLogin'] as Map<String, dynamic>?;
+
       setState(() {
         coinsAvailable = (data['coinsAvailable'] as num?)?.toInt() ?? 0;
         coinsLocked = (data['coinsLocked'] as num?)?.toInt() ?? 0;
+        userName = data['name'] as String?;
+        activeDays = (data['activeDays'] as num?)?.toInt() ?? 0;
+        streak = (daily?['streak'] as num?)?.toInt() ?? 0;
       });
       debugPrint("CoinsAvailable: ${data['coinsAvailable']}");
-      /// ❌ Removed force terms check
+    });
+  }
+
+  void startDailyMissionRealtimeListener() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    dailyMissionSubscription?.cancel();
+
+    dailyMissionSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('missions')
+        .doc('daily')
+        .snapshots()
+        .listen((doc) {
+      if (!mounted) return;
+      if (!doc.exists) return;
+
+      setState(() {
+        dailyMissionData = doc.data();
+      });
     });
   }
 
@@ -321,12 +468,15 @@ class _HomeScreenState extends State<HomeScreen>
     final token = await FirebaseMessaging.instance.getToken();
     if (token == null) return;
 
-    await FirebaseFirestore.instance
+    final userRef = FirebaseFirestore.instance
         .collection('users')
-        .doc(user.uid)
-        .set({
-      'fcmToken': token,
-    }, SetOptions(merge: true));
+        .doc(user.uid);
+
+    try {
+      await userRef.update({'fcmToken': token});
+    } catch (e) {
+      await userRef.set({'fcmToken': token}, SetOptions(merge: true));
+    }
   }
 
   void listenForegroundNotifications() {
@@ -414,7 +564,7 @@ class _HomeScreenState extends State<HomeScreen>
     final option4 = item['option4']?.toString().trim() ?? '';
     final answer = item['answer']?.toString().trim() ?? '';
 
-    // Basic checks
+    // ❌ Basic empty check
     if (question.isEmpty ||
         option1.isEmpty ||
         option2.isEmpty ||
@@ -424,13 +574,11 @@ class _HomeScreenState extends State<HomeScreen>
       return false;
     }
 
-    // Answer must match one of the options
+    // ✅ NEW FIX: answer must match one of options
     final options = [option1, option2, option3, option4];
-    if (!options.contains(answer)) {
-      return false;
-    }
 
-    return true;
+    return options.any((opt) =>
+    opt.toLowerCase().trim() == answer.toLowerCase().trim());
   }
 
   @override
@@ -482,10 +630,23 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Quizzy2Earn'),
-        backgroundColor: Colors.deepPurple,
-      ),
+      appBar: selectedTabIndex == 0
+          ? null
+          : AppBar(
+              title: Text(
+                selectedTabIndex == 1
+                    ? 'My Wallet'
+                    : selectedTabIndex == 2
+                        ? 'Withdrawal Status'
+                        : selectedTabIndex == 3
+                            ? 'Profile'
+                            : 'Bonus Center',
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+              backgroundColor: Colors.deepPurple,
+              elevation: 0,
+              iconTheme: const IconThemeData(color: Colors.white),
+            ),
 
       body: currentScreen,
 
@@ -512,6 +673,290 @@ class _HomeScreenState extends State<HomeScreen>
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _animateItem({required int index, required Widget child}) {
+    final start = (index * 0.1).clamp(0.0, 0.6);
+    final end = (start + 0.4).clamp(0.0, 1.0);
+
+    final Animation<double> fadeAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(
+      CurvedAnimation(
+        parent: _homeAnimController,
+        curve: Interval(start, end, curve: Curves.easeOut),
+      ),
+    );
+
+    final Animation<Offset> slideAnimation = Tween<Offset>(
+      begin: const Offset(0.0, 0.15),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _homeAnimController,
+        curve: Interval(start, end, curve: Curves.easeOutCubic),
+      ),
+    );
+
+    return FadeTransition(
+      opacity: fadeAnimation,
+      child: SlideTransition(
+        position: slideAnimation,
+        child: child,
+      ),
+    );
+  }
+
+  Widget _badge({
+    required IconData icon,
+    required String label,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withOpacity(0.3), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDailyMissionTracker() {
+    if (dailyMissionData == null) {
+      return const SizedBox.shrink();
+    }
+
+    final quiz = (dailyMissionData!['quizCompleted'] as num?)?.toInt() ?? 0;
+    final spin = (dailyMissionData!['spinUsed'] as num?)?.toInt() ?? 0;
+
+    final double quizProgress = (quiz / 10).clamp(0.0, 1.0);
+    final double spinProgress = (spin / 2).clamp(0.0, 1.0);
+    final double overallProgress = (quizProgress + spinProgress) / 2.0;
+    final int percent = (overallProgress * 100).toInt();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withOpacity(0.1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.stars, color: Colors.amber, size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Daily Mission Tracker',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                '$percent%',
+                style: TextStyle(
+                  color: percent == 100 ? Colors.greenAccent : Colors.amberAccent,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: LinearProgressIndicator(
+              value: overallProgress,
+              backgroundColor: Colors.white.withOpacity(0.1),
+              valueColor: AlwaysStoppedAnimation<Color>(
+                percent == 100 ? Colors.greenAccent : Colors.amber,
+              ),
+              minHeight: 8,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: _missionItemMini(
+                  icon: Icons.quiz,
+                  title: 'Quiz Levels',
+                  value: '$quiz/10',
+                  isDone: quiz >= 10,
+                  color: Colors.deepPurpleAccent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _missionItemMini(
+                  icon: Icons.casino,
+                  title: 'Daily Spins',
+                  value: '$spin/2',
+                  isDone: spin >= 2,
+                  color: Colors.orangeAccent,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _missionItemMini({
+    required IconData icon,
+    required String title,
+    required String value,
+    required bool isDone,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isDone ? Colors.green.withOpacity(0.3) : Colors.white.withOpacity(0.05),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: (isDone ? Colors.green : color).withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isDone ? Icons.check : icon,
+              size: 16,
+              color: isDone ? Colors.greenAccent : color,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.5),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _gridActionCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required List<Color> colors,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: colors,
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: colors.first.withOpacity(0.25),
+                blurRadius: 14,
+                offset: const Offset(0, 6),
+              ),
+            ],
+            border: Border.all(
+              color: Colors.white.withOpacity(0.1),
+              width: 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, size: 24, color: Colors.white),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.75),
+                  fontSize: 11,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -578,6 +1023,333 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
+    final displayStreak = streak;
+    final displayActiveDays = activeDays;
+    final displayUserName = userName?.trim().split(' ').first ?? 'Explorer';
+
+    Widget header = Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Welcome back,',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.6),
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$displayUserName! 👋',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            if (displayStreak > 0)
+              _badge(
+                icon: Icons.local_fire_department,
+                label: '$displayStreak',
+                color: Colors.orange,
+              ),
+            const SizedBox(width: 8),
+            _badge(
+              icon: Icons.calendar_today,
+              label: '$displayActiveDays d',
+              color: Colors.blueAccent,
+            ),
+          ],
+        ),
+      ],
+    );
+
+    Widget walletCard = Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            Colors.deepPurple.shade900.withOpacity(0.85),
+            Colors.deepPurple.shade700.withOpacity(0.85),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withOpacity(0.12), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.deepPurple.withOpacity(0.5),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'TOTAL BALANCE',
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.6),
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 3,
+                      backgroundColor: Colors.green,
+                    ),
+                    SizedBox(width: 5),
+                    Text(
+                      'Live',
+                      style: TextStyle(
+                        color: Colors.greenAccent,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              const Text(
+                '🪙',
+                style: TextStyle(fontSize: 28),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${coinsAvailable + coinsLocked}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Coins',
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.8),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Divider(color: Colors.white.withOpacity(0.15), height: 1),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Available Balance',
+                    style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '🟡 $coinsAvailable',
+                    style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Locked / Pending',
+                    style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '🔒 $coinsLocked',
+                    style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    selectedTabIndex = 1;
+                  });
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white.withOpacity(0.2)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Text(
+                        'Redeem',
+                        style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(Icons.arrow_forward, size: 14, color: Colors.white),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    final List<Widget> items = [
+      header,
+      const SizedBox(height: 20),
+      walletCard,
+      const SizedBox(height: 24),
+      if (dailyMissionData != null) ...[
+        _buildDailyMissionTracker(),
+        const SizedBox(height: 24),
+      ],
+      GestureDetector(
+        onTap: handleStartQuiz,
+        child: _gameCard(
+          icon: Icons.quiz,
+          title: 'Start Quiz',
+          subtitle: 'Answer questions & earn coins',
+          colors: const [Color(0xFF6A11CB), Color(0xFF2575FC)],
+          trailingBadge: questions.isNotEmpty
+              ? Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.greenAccent.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${questions.length} Qs',
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                )
+              : null,
+        ),
+      ),
+      const SizedBox(height: 16),
+      GestureDetector(
+        onTap: handleOpenSpin,
+        child: _gameCard(
+          icon: Icons.casino,
+          title: 'Daily Spin Wheel',
+          subtitle: 'Spin & win bonus coins',
+          colors: const [Color(0xFFFF9100), Color(0xFFFF3D00)],
+        ),
+      ),
+      const SizedBox(height: 24),
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'More Ways to Earn',
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              _gridActionCard(
+                icon: Icons.group,
+                title: 'Invite Friends',
+                subtitle: 'Refer & earn coins',
+                colors: const [Color(0xFF00B0FF), Color(0xFF00E5FF)],
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const InviteEarnScreen(),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(width: 14),
+              _gridActionCard(
+                icon: Icons.poll,
+                title: 'Surveys',
+                subtitle: 'Complete offerwalls',
+                colors: const [Color(0xFF00E676), Color(0xFF00B0FF)],
+                onTap: () {
+                  if (!AppConfig.enableCPX) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("Surveys coming soon"),
+                      ),
+                    );
+                    return;
+                  }
+
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const SurveyScreen(),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+      const SizedBox(height: 16),
+      _comingSoonCard(
+        icon: Icons.extension,
+        title: 'More Mini Games',
+        subtitle: 'More features will be added regularly.',
+      ),
+    ];
+
+    final List<Widget> animatedItems = [];
+    int animationIndex = 0;
+
+    for (var widget in items) {
+      if (widget is SizedBox) {
+        animatedItems.add(widget);
+      } else {
+        animatedItems.add(_animateItem(index: animationIndex, child: widget));
+        animationIndex++;
+      }
+    }
+
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -586,139 +1358,35 @@ class _HomeScreenState extends State<HomeScreen>
           end: Alignment.bottomCenter,
         ),
       ),
-      child: Column(
-        children: [
-          if (dataValidationFailed)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(8),
-              color: Colors.orange.shade200,
-              child: Text(
-                '⚠️ Admin Notice: $invalidQuestionCount invalid question(s) skipped',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.black,
-                  fontWeight: FontWeight.bold,
+      child: SafeArea(
+        child: Column(
+          children: [
+            if (dataValidationFailed)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                color: Colors.orange.shade200,
+                child: Text(
+                  '⚠️ Admin Notice: $invalidQuestionCount invalid question(s) skipped',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: animatedItems,
                 ),
               ),
             ),
-
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-
-                  /// 💰 WALLET BAR
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 18, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.deepPurple.shade400,
-                      borderRadius: BorderRadius.circular(18),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.deepPurple.withOpacity(0.4),
-                          blurRadius: 14,
-                          offset: const Offset(0, 6),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: const [
-                        Text(
-                          'Your Wallet',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            fontSize: 14,
-                          ),
-                        ),
-                        Text(
-                          '🟡 Coins: Live',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 30),
-
-                  /// 🎮 START QUIZ CARD
-                  GestureDetector(
-                    onTap: handleStartQuiz,
-                    child: _gameCard(
-                      icon: Icons.quiz,
-                      title: 'Start Quiz',
-                      subtitle: 'Answer questions & earn coins',
-                      colors: const [Colors.deepPurple, Colors.purpleAccent],
-                    ),
-                  ),
-
-                  const SizedBox(height: 22),
-
-                  /// 🎰 DAILY SPIN CARD
-                  GestureDetector(
-                    onTap: handleOpenSpin,
-                    child: _gameCard(
-                      icon: Icons.casino,
-                      title: 'Daily Spin Wheel',
-                      subtitle: 'Spin & win bonus coins',
-                      colors: const [Colors.orange, Colors.deepOrange],
-                    ),
-                  ),
-
-                  const SizedBox(height: 30),
-
-                  /// 🧩 MORE GAMES
-                  const Text(
-                    'More Ways to Earn',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-
-                  const SizedBox(height: 14),
-
-                  GestureDetector(
-                    onTap: () {
-
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const SurveyScreen(),
-                        ),
-                      );
-
-                    },
-
-                    child: _gameCard(
-                      icon: Icons.poll,
-                      title: 'Survey & Offerwalls',
-                      subtitle: 'Complete surveys & earn coins',
-                      colors: const [Colors.blue, Colors.indigo],
-                    ),
-                  ),
-
-                  const SizedBox(height: 14),
-
-                  _comingSoonCard(
-                    icon: Icons.extension,
-                    title: 'More Mini Games',
-                    subtitle: 'Exciting games coming soon...',
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -728,36 +1396,84 @@ class _HomeScreenState extends State<HomeScreen>
     required String title,
     required String subtitle,
     required List<Color> colors,
+    Widget? trailingBadge,
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        gradient: LinearGradient(colors: colors),
-        borderRadius: BorderRadius.circular(22),
+        gradient: LinearGradient(
+          colors: colors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: colors.first.withOpacity(0.4),
+            color: colors.first.withOpacity(0.35),
             blurRadius: 18,
             offset: const Offset(0, 8),
           ),
         ],
+        border: Border.all(
+          color: Colors.white.withOpacity(0.15),
+          width: 1,
+        ),
       ),
       child: Row(
         children: [
-          Icon(icon, size: 42, color: Colors.white),
-          const SizedBox(width: 18),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Icon(icon, size: 32, color: Colors.white),
+          ),
+          const SizedBox(width: 16),
           Expanded(
-            child: Text(
-              '$title\n$subtitle',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    if (trailingBadge != null) ...[
+                      const SizedBox(width: 8),
+                      trailingBadge,
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.85),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
             ),
           ),
-          const Icon(Icons.arrow_forward_ios, color: Colors.white),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.arrow_forward_ios,
+              size: 14,
+              color: Colors.white,
+            ),
+          ),
         ],
       ),
     );
@@ -770,20 +1486,44 @@ class _HomeScreenState extends State<HomeScreen>
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white12),
+        color: Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.08)),
       ),
       child: Row(
         children: [
-          Icon(icon, color: Colors.white54),
-          const SizedBox(width: 12),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: Colors.white38, size: 20),
+          ),
+          const SizedBox(width: 14),
           Expanded(
-            child: Text(
-              '$title\n$subtitle',
-              style: const TextStyle(color: Colors.white54),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Colors.white38,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
             ),
           ),
         ],

@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.10+10
 
 environment:
   sdk: ^3.10.4
@@ -38,13 +38,15 @@ dependencies:
   firebase_core: ^2.25.0
   firebase_auth: ^4.17.0
   cloud_firestore: ^4.15.0
-  google_sign_in: ^6.2.1
   firebase_messaging: ^14.9.4
   device_info_plus: ^10.1.0
   package_info_plus: ^8.0.0
   confetti: ^0.7.0
   google_mobile_ads: ^5.1.0
+  unity_ads_plugin: ^0.3.30
   flutter_fortune_wheel: ^1.3.1
+  lottie: ^3.1.0
+  just_audio: ^0.9.36
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -56,6 +58,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.4.7
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -79,7 +82,10 @@ flutter:
   assets:
     - assets/images/
     - assets/images/logo-cpx-reserach.png
-  #   - images/a_dot_ham.jpeg
+    - assets/animations/coin.json
+    - assets/sounds/coin.mp3
+    - assets/sounds/spin_wheel.mp3
+    - assets/icon/New-icon.png  #   - images/a_dot_ham.jpeg
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
@@ -91,7 +97,7 @@ flutter:
   # in this "flutter" section. Each entry in this list should have a
   # "family" key with the font family name, and a "fonts" key with a
   # list giving the asset and other descriptors for the font. For
-  # example:
+  # app:
   # fonts:
   #   - family: Schyler
   #     fonts:
@@ -109,7 +115,12 @@ flutter:
 
 flutter_launcher_icons:
   android: true
-  ios: true
-  image_path: assets/icon/app_icon.png
+  ios: false
+  image_path: "assets/icon/New-icon.png"
   adaptive_icon_background: "#1E1E2C"
-  adaptive_icon_foreground: assets/icon/app_icon.png
+  adaptive_icon_foreground: "assets/icon/New-icon.png"
+
+flutter_native_splash:
+  color: "#1E1E2C"
+  image: "assets/icon/New-icon.png"
+  android: true

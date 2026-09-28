@@ -44,7 +44,7 @@ class WalletTab extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
             ),
             child: const Text(
-              '📅 Withdrawals are processed in the first week of every month',
+              '📅 Withdrawals are processed in the first week of every month.\n \u2139 Rewards are promotional and subject to terms. No guaranteed earnings.',
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 13,
@@ -185,17 +185,18 @@ class WalletTab extends StatelessWidget {
 
                 final termsDoc = await FirebaseFirestore.instance
                     .collection('app_config')
-                    .doc('terms')
+                    .doc('privacy')
                     .get();
 
-                final agreedVersion = userDoc.data()?['agreedTermsVersion'];
+                final agreedVersion = userDoc.data()?['agreedPrivacyVersion'];
                 final currentVersion = termsDoc.data()?['currentVersion'];
 
                 /// Terms outdated
-                if (agreedVersion != currentVersion) {
+                if (agreedVersion != currentVersion)
+                {
 
                   NavigationService.pushNamed(
-                    AppRouter.terms,
+                    AppRouter.privacy,
                     args: {
                       "currentTermsVersion": currentVersion,
                     },
@@ -213,6 +214,7 @@ class WalletTab extends StatelessWidget {
                       'hasPendingWithdraw': hasPendingWithdraw,
                       'onShowAdThen': onShowAdThen,
                       'onWithdraw': onWithdraw,
+                      'currentTermsVersion': currentVersion, // 🔥 FIX
                     },
                   );
                 });
@@ -221,7 +223,7 @@ class WalletTab extends StatelessWidget {
             ),
           ),
 
-          const SizedBox(height: 10),
+          const SizedBox(height: 0),
 
           const Text(
             'Rewards are processed securely',

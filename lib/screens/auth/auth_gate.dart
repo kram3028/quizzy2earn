@@ -16,7 +16,7 @@ class AuthGate extends StatelessWidget {
         // ⏳ Wait until Firebase restores session
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            body: Center(child: CircularProgressIndicator(color: Colors.white,)),
           );
         }
 

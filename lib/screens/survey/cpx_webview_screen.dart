@@ -28,7 +28,12 @@ class _CPXWebViewScreenState extends State<CPXWebViewScreen> {
 
   Future<void> loadCPX() async {
 
-    final user = FirebaseAuth.instance.currentUser!;
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      return;
+    }
+
     final uid = user.uid;
 
     final userDoc = await FirebaseFirestore.instance
@@ -46,8 +51,8 @@ class _CPXWebViewScreenState extends State<CPXWebViewScreen> {
         "?app_id=$appId"
         "&ext_user_id=$uid"
         "&secure_hash=$hash"
-        "&username=$name"
-        "&email=$email"
+        "&username=${Uri.encodeComponent(name)}"
+        "&email=${Uri.encodeComponent(email)}"
         "&subid_1=survey"
         "&subid_2=app";
 
@@ -59,7 +64,20 @@ class _CPXWebViewScreenState extends State<CPXWebViewScreen> {
     super.initState();
 
     controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted);
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (url) {
+            debugPrint('CPX Start: $url');
+          },
+          onPageFinished: (url) {
+            debugPrint('CPX Finish: $url');
+          },
+          onWebResourceError: (error) {
+            debugPrint(error.description);
+          },
+        ),
+      );
 
     loadCPX();
   }

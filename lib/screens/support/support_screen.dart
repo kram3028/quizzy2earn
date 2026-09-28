@@ -185,7 +185,7 @@ class _SupportScreenState extends State<SupportScreen> {
                     ? const CircularProgressIndicator(color: Colors.white)
                     : const Text(
                   "Submit Support Request",
-                  style: TextStyle(fontSize: 16),
+                  style: TextStyle(fontSize: 16, color: Colors.black),
                 ),
               ),
             ),

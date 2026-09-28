@@ -68,11 +68,8 @@ exports.onWithdrawStatusChange = onDocumentUpdated(
     const before = event.data.before.data();
     const after = event.data.after.data();
 
-    // No status change → do nothing
+    // Only run when status changes
     if (before.status === after.status) return;
-
-    // Already settled → do nothing
-    if (after.coinsSettled === true) return;
 
     const userId = after.userId;
     const coinsUsed = Number(after.coinsUsed || 0);
@@ -81,32 +78,32 @@ exports.onWithdrawStatusChange = onDocumentUpdated(
     const withdrawRef = event.data.after.ref;
 
     await admin.firestore().runTransaction(async (tx) => {
+
       const userSnap = await tx.get(userRef);
       if (!userSnap.exists) return;
 
-      const coinsAvailable = Number(userSnap.data().coinsAvailable || 0);
-      const coinsLocked = Number(userSnap.data().coinsLocked || 0);
+      // 🔥 PREVENT DOUBLE PROCESSING (BETTER CHECK)
+      if (after.coinsSettled === true) return;
 
       if (after.status === "paid") {
-        // ✅ PAID → remove locked coins
         tx.update(userRef, {
-          coinsLocked: Math.max(coinsLocked - coinsUsed, 0),
+          coinsLocked: admin.firestore.FieldValue.increment(-coinsUsed),
         });
       }
 
       if (after.status === "rejected") {
-        // ❌ REJECTED → return coins to available
         tx.update(userRef, {
-          coinsAvailable: coinsAvailable + coinsUsed,
-          coinsLocked: Math.max(coinsLocked - coinsUsed, 0),
+          coinsAvailable: admin.firestore.FieldValue.increment(coinsUsed),
+          coinsLocked: admin.firestore.FieldValue.increment(-coinsUsed),
         });
       }
 
-      // 🔒 Mark as settled (VERY IMPORTANT)
+      // ✅ Mark settled AFTER wallet update
       tx.update(withdrawRef, {
         coinsSettled: true,
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+
     });
     const amount = after.requestedAmount || 0;
 
@@ -198,104 +195,104 @@ exports.claimDailyLogin = onCall(
 
       const reward = rewards[streak - 1];
 
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              user,
+              reward
+          );
+
       tx.update(userRef, {
-        coinsAvailable: admin.firestore.FieldValue.increment(reward),
-        totalCoinsEarned: admin.firestore.FieldValue.increment(reward),
 
-        // ⭐ WEEKLY BONUS TRACKING
-        "bonus.weeklyEarned": admin.firestore.FieldValue.increment(reward),
+        //--------------------------------------------------
+        // Wallet
+        //--------------------------------------------------
 
-        "dailyLogin.streak": streak,
-        "dailyLogin.lastClaim": now,
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        //--------------------------------------------------
+        // Weekly bonus tracking
+        //--------------------------------------------------
+
+        "bonus.weeklyEarned":
+            admin.firestore.FieldValue.increment(reward),
+
+        //--------------------------------------------------
+        // Daily login
+        //--------------------------------------------------
+
+        "dailyLogin.streak":
+            streak,
+
+        "dailyLogin.lastClaim":
+            now,
+
+      });
+
+      //----------------------------------------------------
+      // Wallet history
+      //----------------------------------------------------
+
+      const walletRef = userRef
+          .collection("wallet_transactions")
+          .doc();
+
+      tx.set(walletRef, {
+
+        uid,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "daily_login",
+
+        type: "reward",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
       });
 
       return {
+
         success: true,
+
         reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
         streak,
+
       };
     });
-  }
-);
-
-exports.onReferralMilestone = onDocumentUpdated(
-  {
-    document: "users/{userId}",
-    region: "us-central1",
-  },
-  async (event) => {
-    const before = event.data.before.data();
-    const after = event.data.after.data();
-
-    if (!after.referredBy) return;
-    if (after.referralRewardGiven === true) return;
-
-    const milestoneReached =
-      after.emailVerified === true &&
-      (after.quizLevelsCompleted || 0) >= 10 &&
-      (after.totalCoinsEarned || 0) >= 2500 &&
-      (after.activeDays || 0) >= 3;
-
-    if (!milestoneReached) return;
-
-    const refereeId = event.params.userId;
-    const referrerId = after.referredBy;
-
-    const referrerRef = admin.firestore().collection("users").doc(referrerId);
-    const refereeRef = event.data.after.ref;
-
-    /// 🔥 FAKE REFERRAL DETECTION
-    const referrerSnap = await referrerRef.get();
-    const refereeSnap = await refereeRef.get();
-
-    if (!referrerSnap.exists || !refereeSnap.exists) return;
-
-    const referrerData = referrerSnap.data();
-    const refereeData = refereeSnap.data();
-
-    const referrerFingerprint =
-      referrerData?.deviceInfo?.fingerprint;
-    const refereeFingerprint =
-      refereeData?.deviceInfo?.fingerprint;
-
-    /// ❌ Same device → fake referral
-    if (
-      referrerFingerprint &&
-      refereeFingerprint &&
-      referrerFingerprint === refereeFingerprint
-    ) {
-      await refereeRef.set(
-        {
-          fraud: {
-            fakeReferral: true,
-            isBlocked: true,
-          },
-        },
-        { merge: true }
-      );
-
-      console.log("Fake referral blocked");
-      return;
-    }
-
-    /// ✅ Give reward if clean
-    await admin.firestore().runTransaction(async (tx) => {
-      const referrerSnapTx = await tx.get(referrerRef);
-      if (!referrerSnapTx.exists) return;
-
-      const currentCoins =
-        Number(referrerSnapTx.data().coinsAvailable || 0);
-
-      tx.update(referrerRef, {
-        coinsAvailable: currentCoins + 500,
-      });
-
-      tx.update(refereeRef, {
-        referralRewardGiven: true,
-      });
-    });
-
-    console.log("Referral milestone reward given");
   }
 );
 
@@ -376,9 +373,78 @@ exports.checkDailyMissionComplete = onDocumentUpdated(
     await admin.firestore().runTransaction(async (tx) => {
       const userSnap = await tx.get(userRef);
 
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const userData = userSnap.data();
+
+      const reward = 100;
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              userData,
+              reward
+          );
+
       tx.update(userRef, {
+
+        //--------------------------------------------------
+        // Wallet
+        //--------------------------------------------------
+
         coinsAvailable:
-          (userSnap.data().coinsAvailable || 0) + 200,
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        //--------------------------------------------------
+        // Mission earnings
+        //--------------------------------------------------
+
+        "earnings.missionCoins":
+            admin.firestore.FieldValue.increment(reward),
+
+      });
+
+      //----------------------------------------------------
+      // Wallet history
+      //----------------------------------------------------
+
+      const walletRef =
+          userRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid: userRef.id,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "daily_mission",
+
+        type: "reward",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
       });
 
       tx.update(event.data.after.ref, {
@@ -568,14 +634,14 @@ exports.syncTermsVersion = onSchedule(
     try {
       // 🔥 Fetch live terms page
       const res = await axios.get(
-        "https://quizzy2earn-ea152.web.app/terms.html"
+        "https://quizzy2earn-ea152.web.app/privacy.html"
       );
 
       const html = res.data;
 
       // 🔥 Extract version
       const match = html.match(
-        /<meta name="terms-version" content="(.*?)"/
+        /<meta name="privacy-version" content="(.*?)"/
       );
 
       if (!match) {
@@ -588,7 +654,7 @@ exports.syncTermsVersion = onSchedule(
       const ref = admin
         .firestore()
         .collection("app_config")
-        .doc("terms");
+        .doc("privacy");
 
       const doc = await ref.get();
 
@@ -669,14 +735,82 @@ exports.claimOneTimeReward = onCall(
 
       }
 
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              user,
+              rewardCoins
+          );
+
       tx.update(userRef, {
-        coinsAvailable: admin.firestore.FieldValue.increment(rewardCoins),
-        [fieldName]: true
+
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(rewardCoins),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        "earnings.oneTimeRewardCoins":
+            admin.firestore.FieldValue.increment(rewardCoins),
+
+        [fieldName]:
+            true,
+
+      });
+
+      const walletRef =
+          userRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid,
+
+        coins: rewardCoins,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: rewardType,
+
+        type: "one_time_reward",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
       });
 
       return {
+
         success: true,
-        reward: rewardCoins
+
+        reward: rewardCoins,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
       };
 
     });
@@ -727,23 +861,129 @@ exports.cpxPostback = onRequest(
           throw new Error("User not found");
         }
 
-        /// Update user wallet
+        //----------------------------------------------------
+        // Apply debt recovery
+        //----------------------------------------------------
+
+        const userData = userSnap.data();
+
+        const debtResult =
+            applyRewardWithDebtRecovery(
+                userData,
+                coins
+            );
+
         tx.update(userRef, {
-          coinsAvailable: admin.firestore.FieldValue.increment(coins),
-          totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
-          "earnings.surveyCoins": admin.firestore.FieldValue.increment(coins)
+
+          //--------------------------------------------------
+          // Wallet
+          //--------------------------------------------------
+
+          coinsAvailable:
+              debtResult.newWalletBalance,
+
+          //--------------------------------------------------
+          // Lifetime earnings
+          //--------------------------------------------------
+
+          totalCoinsEarned:
+              admin.firestore.FieldValue.increment(coins),
+
+          //--------------------------------------------------
+          // Survey earnings
+          //--------------------------------------------------
+
+          "earnings.surveyCoins":
+              admin.firestore.FieldValue.increment(coins),
+
+          //--------------------------------------------------
+          // Remaining debt
+          //--------------------------------------------------
+
+          outstandingReversalDebt:
+              debtResult.remainingDebt,
+
         });
 
         /// Save transaction record (FINAL SCHEMA)
         tx.set(txRef, {
+
           uid: uid,
+
           transId: transId,
+
+          //--------------------------------------------------
+          // Original reward
+          //--------------------------------------------------
+
           coins: coins,
+
+          //--------------------------------------------------
+          // Actually credited
+          //--------------------------------------------------
+
+          creditedCoins:
+              debtResult.creditedCoins,
+
+          //--------------------------------------------------
+          // Debt recovered
+          //--------------------------------------------------
+
+          debtRecovered:
+              debtResult.debtPaid,
+
+          //--------------------------------------------------
+          // Remaining debt
+          //--------------------------------------------------
+
+          remainingDebt:
+              debtResult.remainingDebt,
+
           amountUsd: amountUsd,
+
           source: "cpx",
+
           status: "completed",
+
           type: "survey",
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
+
+          createdAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+
+        });
+
+        const walletRef = userRef
+            .collection("wallet_transactions")
+            .doc();
+
+        tx.set(walletRef, {
+
+          uid,
+
+          coins,
+
+          creditedCoins:
+              debtResult.creditedCoins,
+
+          debtRecovered:
+              debtResult.debtPaid,
+
+          remainingDebt:
+              debtResult.remainingDebt,
+
+          source: "cpx",
+
+          type: "survey",
+
+          balanceAfter:
+              debtResult.newWalletBalance,
+
+          transactionId:
+              transId,
+
+          createdAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+
         });
 
       });
@@ -783,14 +1023,95 @@ exports.claimQuizReward = onCall(
     return db.runTransaction(async (tx) => {
 
       const snap = await tx.get(userRef);
-      if (!snap.exists) throw new Error("User not found");
+
+      if (!snap.exists) {
+        throw new Error("User not found");
+      }
+
+      const userData = snap.data();
+
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              userData,
+              coins
+          );
+
+      const newBalance =
+          debtResult.newWalletBalance;
 
       tx.update(userRef, {
-        coinsAvailable: admin.firestore.FieldValue.increment(coins),
-        totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
+
+        //--------------------------------------------------
+        // Wallet
+        //--------------------------------------------------
+
+        coinsAvailable:
+            newBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(coins),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
       });
 
-      return { success: true };
+      //----------------------------------------------------
+      // Wallet history
+      //----------------------------------------------------
+
+      const walletRef =
+          userRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid,
+
+        coins,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "quiz",
+
+        type: "reward",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+      });
+
+      return {
+
+        success: true,
+
+        reward: coins,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+      };
     });
   }
 );
@@ -821,27 +1142,1404 @@ exports.claimGameReward = onCall(
 
       const userData = snap.data();
 
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              userData,
+              coins
+          );
+
       const newBalance =
-                (userData.coinsAvailable || 0) + coins;
+          debtResult.newWalletBalance;
 
       tx.update(userRef, {
-        coinsAvailable: admin.firestore.FieldValue.increment(coins),
-        totalCoinsEarned: admin.firestore.FieldValue.increment(coins),
+
+        //--------------------------------------------------
+        // Wallet
+        //--------------------------------------------------
+
+        coinsAvailable:
+            newBalance,
+
+        //--------------------------------------------------
+        // Lifetime earnings
+        //--------------------------------------------------
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(coins),
+
+        //--------------------------------------------------
+        // Outstanding reversal debt
+        //--------------------------------------------------
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
       });
 
       /// 🔎 reward log (important for anti-fraud)
-      const txRef = db.collection("wallet_transactions").doc();
+      const txRef = db
+        .collection("users")
+        .doc(uid)
+        .collection("wallet_transactions")
+        .doc();
 
       tx.set(txRef, {
+
         uid: uid,
+
+        //--------------------------------------------------
+        // Original reward
+        //--------------------------------------------------
+
         coins: coins,
+
+        //--------------------------------------------------
+        // Coins actually credited
+        //--------------------------------------------------
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        //--------------------------------------------------
+        // Debt paid
+        //--------------------------------------------------
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        //--------------------------------------------------
+        // Remaining debt
+        //--------------------------------------------------
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
         source: source,
-        balanceAfter: newBalance,
+
+        balanceAfter:
+            newBalance,
+
         type: "reward",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
       });
 
       return { success: true };
     });
+  }
+);
+
+exports.trackAdView = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new Error("Unauthenticated");
+
+  const userRef = admin.firestore().collection("users").doc(uid);
+
+  await admin.firestore().runTransaction(async (tx) => {
+    const snap = await tx.get(userRef);
+    const data = snap.data();
+
+    const today = new Date().toISOString().split("T")[0];
+
+    let adData = data.adWatch || {};
+
+    if (adData.date !== today) {
+      adData = { date: today, count: 0 };
+    }
+
+    // ❌ Limit per day
+    if (adData.count >= 50) {
+      throw new Error("Ad limit reached");
+    }
+
+    tx.update(userRef, {
+      "adWatch.count": adData.count + 1,
+      "adWatch.date": today,
+    });
+  });
+
+  return { success: true };
+});
+
+exports.applyReferralCode = onCall(
+  { region: "us-central1" },
+  async (request) => {
+
+    const uid = request.auth?.uid;
+    const code = (request.data.code || "").toUpperCase().trim();
+
+    if (!uid) throw new Error("Unauthenticated");
+    if (!code) throw new Error("Code required");
+
+    const db = admin.firestore();
+    const userRef = db.collection("users").doc(uid);
+
+    return db.runTransaction(async (tx) => {
+
+      // 🔹 GET USER
+      const userSnap = await tx.get(userRef);
+      if (!userSnap.exists) throw new Error("User not found");
+
+      const userData = userSnap.data();
+
+      // 🚫 FRAUD BLOCK
+      if (userData?.fraud?.isBlocked === true) {
+        throw new Error("User blocked");
+      }
+
+      // 🚫 EMULATOR BLOCK (DISABLE FOR TEST IF NEEDED)
+      if (userData?.deviceInfo?.isEmulator === true) {
+        throw new Error("Emulator not allowed");
+      }
+
+      //⚠️ RATE LIMIT
+      const now = Date.now();
+      const lastAttempt = userData?.lastReferralAttempt || 0;
+
+      if (now - lastAttempt < 5000) {
+        throw new Error("Too many attempts");
+      }
+
+      // ❌ ALREADY USED
+      if (userData.referredBy) {
+        throw new Error("Referral already used");
+      }
+
+      // 🔹 GET REFERRAL CODE DOC
+      const codeRef = db.collection("referral_codes").doc(code);
+      const codeSnap = await tx.get(codeRef);
+
+      if (!codeSnap.exists) {
+        throw new Error("Invalid code");
+      }
+
+      const referrerId = codeSnap.data().uid;
+
+      // ❌ SELF REFERRAL
+      if (referrerId === uid) {
+        throw new Error("Cannot use your own code");
+      }
+
+      // 🔹 GET REFERRER USER
+      const referrerRef = db.collection("users").doc(referrerId);
+      const referrerSnap = await tx.get(referrerRef);
+
+      if (!referrerSnap.exists) {
+        throw new Error("Referrer not found");
+      }
+
+      const referrerData = referrerSnap.data();
+
+      // 🔒 SAME DEVICE BLOCK
+      const userFingerprint = userData?.deviceInfo?.fingerprint;
+
+      if (
+        userFingerprint &&
+        referrerData?.deviceInfo?.fingerprint === userFingerprint
+      ) {
+        throw new Error("Same device referral not allowed");
+      }
+
+      // ✅ APPLY REFERRAL TO USER
+      tx.update(userRef, {
+        referredBy: referrerId,
+        referralUsedAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastReferralAttempt: now,
+      });
+
+      // 🔥 SAVE REFERRAL TRACKING (NEW SYSTEM)
+      const referralListRef = referrerRef
+        .collection("referrals_list")
+        .doc(uid);
+
+      tx.set(referralListRef, {
+        userId: uid,
+        joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        quizCount: 0,
+        activeDays: 0,
+        totalCoins: 0,
+        emailVerified: false,
+        profileCompleted: false,
+      }, { merge: true });
+
+      // ✅ REFERRER SUBCOLLECTION (FIXED 🔥)
+      const referrerReferralRef = referrerRef
+        .collection("referral")
+        .doc("main");
+
+      tx.set(
+        referrerReferralRef,
+        {
+          totalReferrals: admin.firestore.FieldValue.increment(1),
+        }, { merge: true });
+
+    });
+  }
+);
+
+exports.onUserProfileCompleted = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const before = event.data.before.data();
+    const after = event.data.after.data();
+
+    // ✅ Only for referred users
+    if (!after.referredBy) return;
+
+    // ✅ Prevent duplicate
+    if (after.profileRewardGiven === true) return;
+
+    const isCompleted =
+      after.emailVerified === true &&
+      after.profileSaved === true;
+
+    if (!isCompleted) return;
+
+    const referrerRef = admin.firestore()
+      .collection("users")
+      .doc(after.referredBy);
+
+    const userRef = event.data.after.ref;
+    let notificationToken = null;
+
+    await admin.firestore().runTransaction(async (tx) => {
+
+      // 🎯 GIVE REWARD ONLY TO USER A (REFERRER)
+      //----------------------------------------------------
+      // Apply debt recovery
+      //----------------------------------------------------
+
+      const referrerData =
+          referrerSnap.data();
+
+      const reward = 25;
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              referrerData,
+              reward
+          );
+
+      tx.update(referrerRef, {
+
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        "earnings.referralCoins":
+            admin.firestore.FieldValue.increment(reward),
+
+      });
+
+      const walletRef =
+          referrerRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid: after.referredBy,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "referral_profile",
+
+        type: "referral",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+      });
+
+      notificationToken =
+          referrerSnap.data()?.fcmToken || null;
+
+      // 🔥 SYNC PROFILE STATUS
+      const referralRef = admin.firestore()
+        .collection("users")
+        .doc(after.referredBy)
+        .collection("referrals_list")
+        .doc(event.params.userId);
+
+      tx.set(referralRef, {
+        emailVerified: true,
+        profileCompleted: true,
+      }, { merge: true });
+
+      // ✅ Mark processed (on user B)
+      tx.update(userRef, {
+        profileRewardGiven: true,
+      });
+
+    });
+
+    //----------------------------------------------------
+    // Send notification AFTER transaction commit
+    //----------------------------------------------------
+
+    if (notificationToken) {
+      try {
+
+        await admin.messaging().send({
+
+          token: notificationToken,
+
+          notification: {
+            title: "🎉 Referral Reward",
+            body: "Your referral completed profile & email. You earned 25 coins!",
+          },
+
+        });
+
+      } catch (e) {
+        console.error("FCM send failed:", e);
+      }
+    }
+
+  }
+);
+
+exports.onQuizMilestone = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const before = event.data.before.data();
+    const after = event.data.after.data();
+
+    const beforeQuiz = before.quizCount || 0;
+    const afterQuiz = after.quizCount || 0;
+
+    // ❌ No increase → ignore
+    if (afterQuiz <= beforeQuiz) return;
+
+    // 🎯 Only every 10 quizzes
+    if (afterQuiz % 10 !== 0) return;
+
+    // ❌ If not referred user → ignore
+    if (!after.referredBy) return;
+
+    const referrerRef = admin.firestore()
+      .collection("users")
+      .doc(after.referredBy);
+
+    let notificationToken = null;
+
+    await admin.firestore().runTransaction(async (tx) => {
+
+      // ✅ GIVE REWARD TO USER A (REFERRER)
+      const referrerSnap = await tx.get(referrerRef);
+
+      const referrerData = referrerSnap.data();
+
+      const reward = 10;
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              referrerData,
+              reward
+          );
+
+      tx.update(referrerRef, {
+
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        "earnings.referralCoins":
+            admin.firestore.FieldValue.increment(reward),
+
+      });
+
+      const walletRef =
+          referrerRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid: after.referredBy,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "referral_quiz_milestone",
+
+        type: "referral",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+      });
+
+      notificationToken =
+          referrerSnap.data()?.fcmToken || null;
+
+      // 🔥 SYNC QUIZ PROGRESS TO REFERRAL LIST
+      const referralRef = admin.firestore()
+        .collection("users")
+        .doc(after.referredBy)
+        .collection("referrals_list")
+        .doc(event.params.userId);
+
+      tx.set(referralRef, {
+        quizCount: afterQuiz,
+      }, { merge: true });
+
+    });
+
+    if (notificationToken) {
+      try {
+
+        await admin.messaging().send({
+
+          token: notificationToken,
+
+          notification: {
+            title: "🎉 Referral Reward",
+            body: "You earned 10 coins from referral!",
+          },
+
+        });
+
+      } catch (e) {
+        console.error("FCM send failed:", e);
+      }
+    }
+
+  }
+);
+
+exports.onEarningMilestone = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const before = event.data.before.data();
+    const after = event.data.after.data();
+
+    if (!after.referredBy) return;
+
+    const beforeCoins = before.coinsAvailable || 0;
+    const afterCoins = after.coinsAvailable || 0;
+
+    const beforeMilestone = Math.floor(beforeCoins / 1000);
+    const afterMilestone = Math.floor(afterCoins / 1000);
+
+    if (afterMilestone <= beforeMilestone) return;
+
+    const referrerRef = admin.firestore()
+      .collection("users")
+      .doc(after.referredBy);
+
+    let notificationToken = null;
+
+    await admin.firestore().runTransaction(async (tx) => {
+
+      const referrerSnap = await tx.get(referrerRef);
+
+      const referrerData = referrerSnap.data();
+
+      const reward = 100;
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              referrerData,
+              reward
+          );
+
+      tx.update(referrerRef, {
+
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        "earnings.referralCoins":
+            admin.firestore.FieldValue.increment(reward),
+
+      });
+
+      const walletRef =
+          referrerRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid: after.referredBy,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "referral_earning_milestone",
+
+        type: "referral",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+      });
+
+      notificationToken =
+          referrerSnap.data()?.fcmToken || null;
+
+      // 🔥 SYNC EARNINGS PROGRESS
+      const referralRef = admin.firestore()
+        .collection("users")
+        .doc(after.referredBy)
+        .collection("referrals_list")
+        .doc(event.params.userId);
+
+      tx.set(referralRef, {
+        totalCoins: after.coinsAvailable || 0,
+      }, { merge: true });
+
+    });
+
+    if (notificationToken) {
+      try {
+
+        await admin.messaging().send({
+
+          token: notificationToken,
+
+          notification: {
+            title: "💰 Big Reward!",
+            body: "You earned 100 coins from referral milestone!",
+          },
+
+        });
+
+      } catch (e) {
+        console.error("FCM send failed:", e);
+      }
+    }
+
+  }
+);
+
+exports.onActiveDaysMilestone = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const before = event.data.before.data();
+    const after = event.data.after.data();
+
+    if (!after.referredBy) return;
+
+    const beforeDays = before.activeDays || 0;
+    const afterDays = after.activeDays || 0;
+
+    if (afterDays < 3 || beforeDays >= 3) return;
+
+    const referrerRef = admin.firestore()
+      .collection("users")
+      .doc(after.referredBy);
+
+    let notificationToken = null;
+
+    await admin.firestore().runTransaction(async (tx) => {
+
+      const referrerSnap = await tx.get(referrerRef);
+
+      const referrerData = referrerSnap.data();
+
+      const reward = 25;
+
+      const debtResult =
+          applyRewardWithDebtRecovery(
+              referrerData,
+              reward
+          );
+
+      tx.update(referrerRef, {
+
+        coinsAvailable:
+            debtResult.newWalletBalance,
+
+        totalCoinsEarned:
+            admin.firestore.FieldValue.increment(reward),
+
+        outstandingReversalDebt:
+            debtResult.remainingDebt,
+
+        "earnings.referralCoins":
+            admin.firestore.FieldValue.increment(reward),
+
+      });
+
+      const walletRef =
+          referrerRef
+              .collection("wallet_transactions")
+              .doc();
+
+      tx.set(walletRef, {
+
+        uid: after.referredBy,
+
+        coins: reward,
+
+        creditedCoins:
+            debtResult.creditedCoins,
+
+        debtRecovered:
+            debtResult.debtPaid,
+
+        remainingDebt:
+            debtResult.remainingDebt,
+
+        source: "referral_active_days",
+
+        type: "referral",
+
+        balanceAfter:
+            debtResult.newWalletBalance,
+
+        createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+      });
+
+      notificationToken =
+          referrerSnap.data()?.fcmToken || null;
+
+      // 🔥 SYNC ACTIVE DAYS
+      const referralRef = admin.firestore()
+        .collection("users")
+        .doc(after.referredBy)
+        .collection("referrals_list")
+        .doc(event.params.userId);
+
+      tx.set(referralRef, {
+        activeDays: after.activeDays || 0,
+      }, { merge: true });
+
+    });
+
+    if (notificationToken) {
+      try {
+
+        await admin.messaging().send({
+
+          token: notificationToken,
+
+          notification: {
+            title: "📅 Active Reward!",
+            body: "Your referral stayed active 3 days!",
+          },
+
+        });
+
+      } catch (e) {
+        console.error("FCM send failed:", e);
+      }
+    }
+
+  }
+);
+
+exports.syncReferralProgress = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    region: "us-central1",
+  },
+  async (event) => {
+
+    const after = event.data.after.data();
+
+    // ❌ Not referred user → skip
+    if (!after.referredBy) return;
+
+    const referralRef = admin.firestore()
+      .collection("users")
+      .doc(after.referredBy)
+      .collection("referrals_list")
+      .doc(event.params.userId);
+
+    await referralRef.set({
+      quizCount: after.quizCount || 0,
+      totalCoins: after.coinsAvailable || 0,
+      activeDays: after.activeDays || 0,
+    }, { merge: true });
+
+  }
+);
+
+exports.createWithdrawRequestSecure = onCall(
+  { region: "us-central1" },
+  async (request) => {
+
+    const uid = request.auth?.uid;
+    const { amount, payoutMethod, payoutDetail } = request.data;
+
+    if (!uid) {
+      throw new functions.https.HttpsError(
+        "unauthenticated",
+        "User not logged in"
+      );
+    }
+
+    const db = admin.firestore();
+    const userRef = db.collection("users").doc(uid);
+
+    /// 🔹 GET COIN CONFIG
+    const configSnap = await db.collection("app_config")
+      .doc("coin_settings")
+      .get();
+
+    if (!configSnap.exists) {
+      throw new functions.https.HttpsError("internal", "Config missing");
+    }
+
+    const coinValue = configSnap.data().coinValue || 0.8;
+    const coinsRequired = Math.ceil(amount / coinValue);
+
+    await db.runTransaction(async (tx) => {
+
+      const userSnap = await tx.get(userRef);
+      if (!userSnap.exists) throw new functions.https.HttpsError("not-found", "User not found");
+
+      const data = userSnap.data();
+
+      const available = data.coinsAvailable || 0;
+      const locked = data.coinsLocked || 0;
+
+      /// 🔒 SECURITY CHECKS
+      if (locked > 0) {
+        throw new functions.https.HttpsError("failed-precondition", "Pending withdraw exists");
+      }
+
+      if (available < coinsRequired) {
+        throw new functions.https.HttpsError("failed-precondition", "Insufficient balance");
+      }
+
+      if (amount <= 0) {
+        throw new functions.https.HttpsError("invalid-argument", "Invalid amount");
+      }
+
+      /// 🔒 TERMS CHECK
+      const termsSnap = await tx.get(
+        db.collection("app_config").doc("privacy")
+      );
+
+      const termsVersion = termsSnap.data()?.currentVersion;
+
+      if (
+        data.agreedToTerms !== true ||
+        data.agreedTermsVersion !== termsVersion
+      ) {
+        throw new functions.https.HttpsError("failed-precondition", "Accept latest terms");
+      }
+
+      /// 🔒 UPDATE WALLET (SAFE)
+      tx.update(userRef, {
+        coinsAvailable: available - coinsRequired,
+        coinsLocked: locked + coinsRequired,
+      });
+
+      /// 🔥 CREATE WITHDRAW REQUEST
+      const withdrawRef = db.collection("withdraw_requests").doc();
+
+      tx.set(withdrawRef, {
+        userId: uid,
+        requestedAmount: amount,
+        coinsUsed: coinsRequired,
+        coinValue: coinValue,
+        payoutMethod,
+        payoutDetail,
+        status: "pending",
+        coinsSettled: false,
+        rejectReason: "",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAtLocal: Date.now(),
+      });
+
+    });
+
+    return { success: true };
+  }
+);
+
+const crypto = require("crypto");
+
+function toBase64Url(buffer) {
+  return buffer
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "")
+      .replace(/\n/g, "");
+}
+
+function verifyTheoremReachSignature(rawUrl, secretKey, receivedHash) {
+  const hmac = crypto.createHmac("sha1", secretKey);
+  hmac.update(rawUrl);
+
+  const calculatedHash = toBase64Url(hmac.digest());
+
+  return crypto.timingSafeEqual(
+      Buffer.from(calculatedHash),
+      Buffer.from(receivedHash)
+  );
+}
+
+/**
+ * Calculates how a reward should be split between
+ * outstanding reversal debt and the user's wallet.
+ *
+ * Does NOT update Firestore.
+ */
+function applyRewardWithDebtRecovery(userData, rewardCoins) {
+
+  const currentDebt =
+      Number(userData.outstandingReversalDebt || 0);
+
+  //----------------------------------------------------
+  // No debt
+  //----------------------------------------------------
+
+  if (currentDebt <= 0) {
+
+    return {
+
+      creditedCoins: rewardCoins,
+
+      debtPaid: 0,
+
+      remainingDebt: 0,
+
+      newWalletBalance:
+          Number(userData.coinsAvailable || 0) + rewardCoins,
+
+    };
+
+  }
+
+  //----------------------------------------------------
+  // Reward pays debt first
+  //----------------------------------------------------
+
+  const debtPaid =
+      Math.min(currentDebt, rewardCoins);
+
+  const creditedCoins =
+      rewardCoins - debtPaid;
+
+  const remainingDebt =
+      currentDebt - debtPaid;
+
+  return {
+
+    creditedCoins,
+
+    debtPaid,
+
+    remainingDebt,
+
+    newWalletBalance:
+        Number(userData.coinsAvailable || 0) + creditedCoins,
+
+  };
+
+}
+
+exports.theoremReachPostback = onRequest(
+  {
+    region: "us-central1",
+
+    secrets: ["THEOREMREACH_SECRET"],
+    timeoutSeconds: 540,
+
+  },
+  async (req, res) => {
+
+    try {
+
+      console.log("========== THEOREMREACH CALLBACK ==========");
+
+      if (req.method !== "GET") {
+        return res.status(405).send("Method Not Allowed");
+      }
+
+      //----------------------------------------------------------------------
+      // CHANGE THIS
+      //----------------------------------------------------------------------
+      // TEMPORARY - testing only
+      const secretKey = process.env.THEOREMREACH_SECRET;
+      // or use your existing configuration method if you've already stored it there
+      //----------------------------------------------------------------------
+
+      if (!secretKey) {
+        console.error("Missing THEOREMREACH_SECRET");
+
+        return res.status(500).send("Server configuration error");
+      }
+
+      //-------------------------------------------------------
+      // Original URL exactly as received
+      //-------------------------------------------------------
+
+      const fullUrl =
+          `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+
+      //-------------------------------------------------------
+      // Extract received hash
+      //-------------------------------------------------------
+
+      const receivedHash = req.query.hash;
+
+      if (!receivedHash) {
+        return res.status(400).send("Missing hash");
+      }
+
+      //-------------------------------------------------------
+      // Remove ONLY hash parameter
+      // while preserving original parameter order
+      //-------------------------------------------------------
+
+      const rawUrl = fullUrl
+          .replace(/[?&]hash=[^&]*/, "")
+          .replace("?&", "?")
+          .replace(/&$/, "");
+
+      //-------------------------------------------------------
+      // Verify signature
+      //-------------------------------------------------------
+
+      const valid = verifyTheoremReachSignature(
+          rawUrl,
+          secretKey,
+          receivedHash
+      );
+
+      if (!valid) {
+
+        console.error("Invalid TheoremReach signature");
+
+        return res.status(403).send("Invalid signature");
+      }
+
+      console.log("Signature verified successfully");
+
+      //-------------------------------------------------------
+      // Read callback values
+      //-------------------------------------------------------
+
+      const {
+        app_id,
+        user_id,
+        reward,
+        currency,
+        tx_id,
+        screenout,
+        profiler,
+        reversal,
+        offer_id,
+        campaign_id,
+        debug,
+        ip,
+      } = req.query;
+
+      console.log({
+        app_id,
+        user_id,
+        reward,
+        currency,
+        tx_id,
+        screenout,
+        profiler,
+        reversal,
+        offer_id,
+        campaign_id,
+        debug,
+        ip,
+      });
+
+      //-------------------------------------------------------
+      // Normalize reversal flag
+      //-------------------------------------------------------
+
+      const isReversal =
+          String(reversal || "")
+              .trim()
+              .toLowerCase() === "true";
+
+      //-------------------------------------------------------
+      // Normalize callback flags
+      //-------------------------------------------------------
+
+      const isScreenout =
+          String(screenout || "") === "1";
+
+      const rewardCoins =
+          Number(reward || 0);
+
+      console.log({
+        isReversal,
+        isScreenout,
+        rewardCoins,
+      });
+
+      console.log("Reversal:", isReversal);
+
+      //-------------------------------------------------------
+      // STEP 6.4
+      // Reward Processing
+      //-------------------------------------------------------
+
+      const db = admin.firestore();
+
+      const uid = String(user_id);
+      const coins = rewardCoins;
+
+      if (!Number.isFinite(coins) || coins < 0) {
+        return res.status(400).send("Invalid reward");
+      }
+
+      if (!Number.isFinite(coins) || coins <= 0) {
+        return res.status(400).send("Invalid reward");
+      }
+
+      const userRef =
+          db.collection("users").doc(uid);
+
+      const theoremTxRef =
+          db.collection("theoremreach_transactions")
+              .doc(String(tx_id));
+
+      const walletRef =
+          userRef
+              .collection("wallet_transactions")
+              .doc();
+
+      //-------------------------------------------------------
+      // No wallet update required
+      //-------------------------------------------------------
+
+      if (coins === 0 && !isReversal) {
+
+        console.log(
+            "Screen-out or informational callback (0 reward)."
+        );
+
+        await db.collection("theoremreach_transactions")
+            .doc(String(tx_id))
+            .set({
+
+              uid,
+
+              txId: String(tx_id),
+
+              reward: 0,
+
+              screenout: screenout || null,
+
+              profiler: profiler || null,
+
+              status: "screenout",
+
+              processed: true,
+
+              processedAt:
+                  admin.firestore.FieldValue.serverTimestamp(),
+
+            }, { merge: true });
+
+        return res.status(200).send("OK");
+      }
+
+      await db.runTransaction(async (tx) => {
+
+        //----------------------------------------------------
+        // Duplicate protection
+        //----------------------------------------------------
+
+        const theoremTxSnap =
+            await tx.get(theoremTxRef);
+
+        const isReversal =
+            String(reversal || "").toLowerCase() === "true";
+
+        if (theoremTxSnap.exists) {
+
+          const previous = theoremTxSnap.data();
+
+          //--------------------------------------------------
+          // Normal callback already processed
+          //--------------------------------------------------
+
+          if (!isReversal) {
+
+            console.log(
+              "Duplicate TheoremReach transaction:",
+              tx_id
+            );
+
+            return;
+          }
+
+          //--------------------------------------------------
+          // Already reversed
+          //--------------------------------------------------
+
+          if (previous.reversed === true) {
+
+            console.log(
+              "Transaction already reversed:",
+              tx_id
+            );
+
+            return;
+          }
+
+        }
+
+        //----------------------------------------------------
+        // User
+        //----------------------------------------------------
+
+        const userSnap =
+            await tx.get(userRef);
+
+        if (!userSnap.exists) {
+          throw new Error("User not found");
+        }
+
+        const userData = userSnap.data();
+
+        //----------------------------------------------------
+        // Current Wallet State
+        //----------------------------------------------------
+
+        const currentBalance =
+            Number(userData.coinsAvailable || 0);
+
+        const currentDebt =
+            Number(userData.outstandingReversalDebt || 0);
+
+        const newBalance =
+            currentBalance + coins;
+
+        //----------------------------------------------------
+        // Reversal calculations
+        //----------------------------------------------------
+
+        let deductedCoins = 0;
+
+        let remainingDebt = 0;
+
+        let finalBalance = newBalance;
+
+        //----------------------------------------------------
+        // Update Wallet
+        //----------------------------------------------------
+
+        if (isReversal) {
+
+          //--------------------------------------------------
+          // Clamp balance at zero and record remaining debt
+          //--------------------------------------------------
+
+          deductedCoins =
+              Math.min(currentBalance, coins);
+
+          remainingDebt =
+              coins - deductedCoins;
+
+          finalBalance =
+              currentBalance - deductedCoins;
+
+          tx.update(userRef, {
+
+            coinsAvailable:
+                currentBalance - deductedCoins,
+
+            "earnings.surveyCoins":
+                admin.firestore.FieldValue.increment(-coins),
+
+            outstandingReversalDebt:
+                currentDebt + remainingDebt,
+
+          });
+
+        } else {
+
+          //--------------------------------------------------
+          // Normal reward
+          //--------------------------------------------------
+
+          finalBalance = newBalance;
+
+          tx.update(userRef, {
+
+            coinsAvailable:
+                admin.firestore.FieldValue.increment(coins),
+
+            totalCoinsEarned:
+                admin.firestore.FieldValue.increment(coins),
+
+            "earnings.surveyCoins":
+                admin.firestore.FieldValue.increment(coins),
+
+          });
+
+        }
+
+        //----------------------------------------------------
+        // Wallet History
+        //----------------------------------------------------
+
+        tx.set(walletRef, {
+
+          uid: uid,
+
+          coins: isReversal ? -coins : coins,
+
+          source: "theoremreach",
+
+          type: isReversal ? "survey_reversal" : "survey",
+
+          balanceAfter: finalBalance,
+
+          deductedCoins:
+              isReversal ? deductedCoins : null,
+
+          outstandingDebtCreated:
+              isReversal ? remainingDebt : null,
+
+          transactionId: String(tx_id),
+
+          offerId: offer_id || null,
+
+          campaignId: campaign_id || null,
+
+          createdAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+
+        });
+
+        //----------------------------------------------------
+        // Transaction Log
+        //----------------------------------------------------
+
+        tx.set(theoremTxRef, {
+
+          uid: uid,
+
+          txId: String(tx_id),
+
+          reward: coins,
+
+          currency: currency || null,
+
+          appId: app_id || null,
+
+          offerId: offer_id || null,
+
+          campaignId: campaign_id || null,
+
+          status: isReversal
+              ? "reversed"
+              : (isScreenout && coins === 0)
+                  ? "screenout"
+                  : "completed",
+
+          reversed: isReversal,
+
+          reversedAt: isReversal
+              ? admin.firestore.FieldValue.serverTimestamp()
+              : null,
+
+          screenout: screenout || null,
+
+          profiler: profiler || null,
+
+          processed: true,
+
+          processedAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+
+        }, { merge: true });
+
+      });
+
+      console.log(
+          `TheoremReach reward credited: ${uid} +${coins}`
+      );
+
+      return res.status(200).send("OK");
+
+    } catch (e) {
+
+      console.error(e);
+
+      return res.status(500).send("Internal Server Error");
+    }
   }
 );

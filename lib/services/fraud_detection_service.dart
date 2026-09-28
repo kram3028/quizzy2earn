@@ -12,6 +12,11 @@ class FraudDetectionService {
     if (Platform.isAndroid) {
       final android = await deviceInfo.androidInfo;
 
+      final isEmulator =
+          !android.isPhysicalDevice ||
+              android.brand.toLowerCase().contains("generic") ||
+              android.model.toLowerCase().contains("sdk");
+
       return {
         'platform': 'Android',
         'deviceModel': android.model,
@@ -19,9 +24,10 @@ class FraudDetectionService {
         'device': android.device,
         'hardware': android.hardware,
         'fingerprint': android.fingerprint,
-        'isPhysical': android.isPhysicalDevice,
 
-        /// 🔥 Emulator detection signals
+        'isPhysical': android.isPhysicalDevice,
+        'isEmulator': isEmulator, // 🔥 ADD THIS
+
         'isEmulatorBrand': android.brand.toLowerCase().contains("generic"),
         'isEmulatorModel': android.model.toLowerCase().contains("sdk"),
       };
@@ -47,13 +53,21 @@ class FraudDetectionService {
 
     final data = await generateDeviceFingerprint();
 
-    await FirebaseFirestore.instance
+    final userRef = FirebaseFirestore.instance
         .collection('users')
-        .doc(user.uid)
-        .set({
-      'deviceInfo': data,
-      'fingerprintUpdatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+        .doc(user.uid);
+
+    try {
+      await userRef.update({
+        'deviceInfo': data,
+        'fingerprintUpdatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e) {
+      await userRef.set({
+        'deviceInfo': data,
+        'fingerprintUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    }
   }
 
   /// 🔥 Multi-account detection
@@ -69,7 +83,22 @@ class FraudDetectionService {
         isEqualTo: device['fingerprint'])
         .get();
 
-    return query.docs.length > 1;
+    // ❗ If more than 1 account → BLOCK
+    if (query.docs.length > 1) {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .set({
+        'fraud': {
+          'multiAccount': true,
+          'isBlocked': true,
+        }
+      }, SetOptions(merge: true));
+
+      return true;
+    }
+
+    return false;
   }
 
   /// 🔥 Fraud risk scoring
@@ -110,13 +139,30 @@ class FraudDetectionService {
 
     final score = await calculateRiskScore();
 
-    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
       'fraud': {
         'riskScore': score,
         'isSuspicious': score > 60,
-        'isBlocked': score > 85,
+        'isBlocked': score > 80,
         'lastChecked': FieldValue.serverTimestamp(),
       }
-    }, SetOptions(merge: true));
+    });
+  }
+
+  static Future<void> enforceBlockIfNeeded() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final doc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get();
+
+    final fraud = doc.data()?['fraud'];
+
+    if (fraud != null && fraud['isBlocked'] == true) {
+      await FirebaseAuth.instance.signOut();
+      throw Exception("Account blocked due to suspicious activity");
+    }
   }
 }
